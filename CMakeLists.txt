@@ -59,7 +59,9 @@ FetchContent_MakeAvailable(cli11)
 # Core library. Tests link this directly; main.cpp stays a thin shell.
 # ---------------------------------------------------------------------------
 add_library(shrink_core STATIC
+  src/ir.cpp
   src/runner.cpp
+  src/spec.cpp
   src/version.cpp)
 target_include_directories(shrink_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
@@ -89,7 +91,9 @@ if(SHRINK_BUILD_TESTS)
   target_link_libraries(shrink_test_child PRIVATE shrink_warnings)
 
   add_executable(shrink_tests
+    tests/unit/ir_test.cpp
     tests/unit/runner_test.cpp
+    tests/unit/spec_test.cpp
     tests/unit/version_test.cpp)
   target_link_libraries(shrink_tests PRIVATE
     shrink_core shrink_warnings Catch2::Catch2WithMain)

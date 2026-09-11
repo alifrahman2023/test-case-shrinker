@@ -31,7 +31,7 @@ behind each decision in [context/notes.md](context/notes.md).
 |---|---|
 | M0 · build skeleton, `shrink --version`, Catch2, CI | done |
 | M1 · process runner | done |
-| M2 · format spec + IR | not started |
+| M2 · format spec + IR | done |
 | M3 · oracle + cache | not started |
 | M4 · delete/shrink passes + driver | not started |
 | M5 · relabel, normalize, align, sort, grid passes | not started |
@@ -39,7 +39,15 @@ behind each decision in [context/notes.md](context/notes.md).
 | M7 · CLI polish, progress, JSON report | not started |
 | M8 · demos, Docker, docs | not started |
 
-`shrink` currently parses its arguments and prints its version. Reduction is not implemented yet.
+`shrink` can parse a format spec and an input file and print the resulting tree. Reduction
+itself is not implemented yet.
+
+```sh
+shrink --preset graph --dry-run fail.txt
+```
+
+Presets are `array`, `multi`, `graph`, `grid`, `string` and `scalars`; `--format` takes the DSL
+directly, for example `--format "n; a[n]"`.
 
 ## Build
 
