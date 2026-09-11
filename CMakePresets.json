@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
@@ -17,8 +21,7 @@
       "displayName": "Debug + ASan/UBSan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+        "SHRINK_SANITIZE": "address"
       }
     },
     {
@@ -27,8 +30,7 @@
       "displayName": "Debug + ThreadSanitizer",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+        "SHRINK_SANITIZE": "thread"
       }
     },
     {
@@ -37,7 +39,7 @@
       "displayName": "Optimized, no sanitizers",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_FLAGS": "-O2 -DNDEBUG"
+        "SHRINK_SANITIZE": "none"
       }
     },
     {
@@ -46,26 +48,60 @@
       "displayName": "CI build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "SHRINK_WERROR": "ON"
+        "SHRINK_WERROR": "ON",
+        "SHRINK_SANITIZE": "none"
       }
     }
   ],
   "buildPresets": [
-    { "name": "dev", "configurePreset": "dev" },
-    { "name": "tsan", "configurePreset": "tsan" },
-    { "name": "release", "configurePreset": "release" },
-    { "name": "ci", "configurePreset": "ci" }
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci"
+    }
   ],
   "testPresets": [
     {
       "name": "base",
       "hidden": true,
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
     },
-    { "name": "dev", "inherits": "base", "configurePreset": "dev" },
-    { "name": "tsan", "inherits": "base", "configurePreset": "tsan" },
-    { "name": "release", "inherits": "base", "configurePreset": "release" },
-    { "name": "ci", "inherits": "base", "configurePreset": "ci" }
+    {
+      "name": "dev",
+      "inherits": "base",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "configurePreset": "release"
+    },
+    {
+      "name": "ci",
+      "inherits": "base",
+      "configurePreset": "ci"
+    }
   ]
 }

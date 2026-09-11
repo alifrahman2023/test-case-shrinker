@@ -30,7 +30,7 @@ behind each decision in [context/notes.md](context/notes.md).
 | Milestone | State |
 |---|---|
 | M0 · build skeleton, `shrink --version`, Catch2, CI | done |
-| M1 · process runner | not started |
+| M1 · process runner | done |
 | M2 · format spec + IR | not started |
 | M3 · oracle + cache | not started |
 | M4 · delete/shrink passes + driver | not started |
@@ -62,6 +62,7 @@ GitHub Actions workflow runs.
 | `include/shrink/` | public headers for the core library |
 | `src/` | core implementation, plus a thin `main.cpp` |
 | `tests/unit/` | Catch2 tests linked against `shrink_core` |
+| `tests/helpers/` | a stand-in child process the runner tests drive |
 | `plans/`, `context/` | the design plan and the reasoning behind it |
 
 Everything of substance lives in the `shrink_core` static library so tests link it directly.

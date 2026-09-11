@@ -1,8 +1,8 @@
+#include <shrink/runner.hpp>
 #include <shrink/version.hpp>
 
 #include <CLI/CLI.hpp>
 
-#include <csignal>
 #include <iostream>
 #include <string>
 
@@ -24,7 +24,7 @@ constexpr int kExitNotImplemented = 70;  // EX_SOFTWARE
 int main(int argc, char** argv) {
   // Writing to a child that already exited must not kill the shrinker (plan §9.1).
   // Installed before anything can spawn a process, which means here.
-  std::signal(SIGPIPE, SIG_IGN);
+  shrink::install_sigpipe_guard();
 
   CLI::App app{"shrink — format-aware test-case reducer", "shrink"};
   app.set_version_flag("-V,--version", std::string{shrink::version()});
