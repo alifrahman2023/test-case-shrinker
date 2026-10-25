@@ -28,12 +28,15 @@ std::vector<std::string> child(std::vector<std::string> args) {
 }
 
 /// Deterministic filler, so a failure is reproducible and a diff is meaningful.
+///
+/// Sized once and written by index, never grown with push_back. GCC's AddressSanitizer on
+/// Linux enables stack-use-after-return detection by default, which makes each push_back
+/// at -O0 cost microseconds: 10 MB took 193 s that way against 0.2 s written by index. The
+/// Mac's ASan leaves that check off, so only the Linux dev build ever showed it.
 std::string blob(std::size_t bytes) {
-  std::string s;
-  s.reserve(bytes);
+  std::string s(bytes, '\0');
   std::mt19937 rng{12345};
-  while (s.size() < bytes) s.push_back(static_cast<char>('a' + rng() % 26));
-  s.resize(bytes);
+  for (char& c : s) c = static_cast<char>('a' + rng() % 26);
   return s;
 }
 

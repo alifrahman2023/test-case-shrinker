@@ -63,6 +63,29 @@ ctest --preset dev
 Other presets: `release` for an optimized build, `tsan` for ThreadSanitizer, `ci` for what the
 GitHub Actions workflow runs.
 
+## Checking the Linux build before you push
+
+CI builds with GCC on Linux, and GCC warns about things clang does not. A clean build on a Mac
+is therefore not proof that CI will pass. Run this once after cloning:
+
+```sh
+scripts/bootstrap.sh
+```
+
+From then on every `git push` first runs the Linux CI jobs in Docker against the commit being
+pushed: the clang-format check, then the `ci`, `dev` and `tsan` presets with GCC 13. A failure
+aborts the push. `git push --no-verify` skips it once.
+
+To run the same checks by hand against uncommitted work:
+
+```sh
+scripts/check-linux.sh          # all three presets
+scripts/check-linux.sh ci       # just one
+```
+
+Docker Desktop is started automatically if it is not already running. Builds are cached in a
+Docker volume, so only the first run is slow.
+
 ## Layout
 
 | Path | Holds |
@@ -71,6 +94,7 @@ GitHub Actions workflow runs.
 | `src/` | core implementation, plus a thin `main.cpp` |
 | `tests/unit/` | Catch2 tests linked against `shrink_core` |
 | `tests/helpers/` | a stand-in child process the runner tests drive |
+| `docker/`, `scripts/`, `.githooks/` | the Linux CI check and the pre-push hook that runs it |
 | `plans/`, `context/` | the design plan and the reasoning behind it |
 
 Everything of substance lives in the `shrink_core` static library so tests link it directly.

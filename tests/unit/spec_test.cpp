@@ -25,7 +25,10 @@ std::string rejection(const std::string& dsl) {
   return parsed.error;
 }
 
-const Field& field_of(const Spec& spec, const std::string& name) {
+// Returns a copy, not a reference. GCC's -Wdangling-reference cannot tell that a returned
+// reference points into `spec` rather than into the temporary string argument, and fails
+// the build under -Werror.
+Field field_of(const Spec& spec, const std::string& name) {
   const int idx = spec.field_index(name);
   REQUIRE(idx >= 0);
   return spec.field(idx);
@@ -77,7 +80,7 @@ TEST_CASE("a range bound marks a label domain", "[spec][domain]") {
   REQUIRE(field_of(spec, "m").role == Field::Role::Derived);
   REQUIRE(field_of(spec, "n").role == Field::Role::Domain);
 
-  const auto& u = field_of(spec, "u");
+  const auto u = field_of(spec, "u");
   REQUIRE(u.lo == 1);
   REQUIRE(u.hi_field == spec.field_index("n"));
   REQUIRE(field_of(spec, "v").hi_field == u.hi_field);
