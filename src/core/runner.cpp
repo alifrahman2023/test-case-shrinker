@@ -29,15 +29,24 @@ class MacExecutionBackend final : public detail::ExecutionBackend {
     };
     std::array<Child, 2> children_;
     mach_timebase_info_data_t timebase_{};
+    // A failed close can leave release uncertain. Keep responsibility and block
+    // reuse of the runner; never retry a number that another thread may reuse.
+    std::array<std::vector<int>, 2> uncertain_closes_;
+    int close_owned(int program, int fd) {
+        if (close(fd) == 0) return 0;
+        const int error = errno;
+        uncertain_closes_[program].push_back(fd);
+        return error;
+    }
 
-    static bool configure(int& fd) {
+    bool configure(int program, int& fd) {
         if (fd < 3) {
             const int replacement = fcntl(fd, F_DUPFD_CLOEXEC, 3);
             const int saved = errno;
-            close(fd);
+            const int close_error = close_owned(program, fd);
             fd = replacement;
-            errno = saved;
-            return fd >= 0;
+            errno = close_error ? close_error : saved;
+            return fd >= 0 && !close_error;
         }
         return fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
     }
@@ -46,8 +55,8 @@ class MacExecutionBackend final : public detail::ExecutionBackend {
         if (fd < 0) return;
         const int owned = fd;
         fd = -1;
-        if (close(owned) < 0) events.push_back({program, EventKind::error, {}, errno,
-                                             RunnerErrorCode::cleanup, "close descriptor"});
+        if (const int error = close_owned(program, owned))
+            events.push_back({program, EventKind::error, {}, error, RunnerErrorCode::cleanup, "close descriptor"});
     }
 public:
     MacExecutionBackend() { mach_timebase_info(&timebase_); }
@@ -59,7 +68,8 @@ public:
     std::optional<int> process_id(int program) const override { return children_[program].pid; }
     bool pending(int program) const override {
         const auto& child = children_[program];
-        return child.pid > 0 || std::any_of(child.fd.begin(), child.fd.end(), [](int fd) { return fd >= 0; });
+        return child.pid > 0 || !uncertain_closes_[program].empty()
+            || std::any_of(child.fd.begin(), child.fd.end(), [](int fd) { return fd >= 0; });
     }
     std::optional<RunnerError> launch(int program, const ProgramSpec& spec, std::string_view input) override {
         auto& child = children_[program];
@@ -73,14 +83,21 @@ public:
         std::array<std::array<int, 2>, 4> pipes;
         for (auto& pair : pipes) pair = {-1, -1};
         auto fail = [&](int error, const char* operation) -> std::optional<RunnerError> {
-            for (auto& pair : pipes) for (int fd : pair) if (fd >= 0) close(fd);
+            int cleanup_error = 0;
+            for (auto& pair : pipes) for (int fd : pair) if (fd >= 0) {
+                const int closed = close_owned(program, fd);
+                if (closed) cleanup_error = closed;
+            }
+            if (cleanup_error || !uncertain_closes_[program].empty())
+                return RunnerError{RunnerErrorCode::cleanup, program, cleanup_error ? cleanup_error : error,
+                                   std::string("descriptor release uncertain after ") + operation};
             return RunnerError{RunnerErrorCode::launch, program, error, operation};
         };
         for (int stream = 0; stream < 4; ++stream) {
             const int result = stream == 0 ? socketpair(AF_UNIX, SOCK_STREAM, 0, pipes[stream].data())
                                            : pipe(pipes[stream].data());
             if (result < 0) return fail(errno, "create pipe");
-            for (auto& fd : pipes[stream]) if (!configure(fd)) return fail(errno, "configure descriptor");
+            for (auto& fd : pipes[stream]) if (!configure(program, fd)) return fail(errno, "configure descriptor");
             const int parent = pipes[stream][stream == 0 ? 1 : 0];
             const int flags = fcntl(parent, F_GETFL);
             if (flags < 0 || fcntl(parent, F_SETFL, flags | O_NONBLOCK) < 0) return fail(errno, "nonblocking descriptor");
@@ -97,7 +114,9 @@ public:
             if (dup2(pipes[0][0], STDIN_FILENO) < 0 || dup2(pipes[1][1], STDOUT_FILENO) < 0
                 || dup2(pipes[2][1], STDERR_FILENO) < 0) error = errno;
             const int setup = pipes[3][1];
-            for (const auto& pair : pipes) for (int fd : pair) if (fd != setup) close(fd);
+            for (const auto& pair : pipes) for (int fd : pair) if (fd != setup) {
+                if (close(fd) < 0 && !error) error = errno;
+            }
             if (!error) {
                 execve(argv[0], argv.data(), environ);
                 error = errno;
@@ -116,8 +135,8 @@ public:
         for (int stream = 0; stream < 4; ++stream) {
             const int parent_end = stream == 0 ? 1 : 0;
             child.fd[stream] = pipes[stream][parent_end];
-            if (close(pipes[stream][1 - parent_end]) < 0)
-                deferred_.push_back({program, EventKind::error, {}, errno, RunnerErrorCode::cleanup, "close unused descriptor"});
+            if (const int error = close_owned(program, pipes[stream][1 - parent_end]))
+                deferred_.push_back({program, EventKind::error, {}, error, RunnerErrorCode::cleanup, "close unused descriptor"});
         }
         return {};
     }
@@ -230,29 +249,26 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         result.errors.push_back({RunnerErrorCode::pending_ownership, -1, 0, "runner retains prior execution"});
         return result;
     }
-    if (limits.solution_timeout.count() <= 0 || limits.reference_timeout.count() <= 0) {
-        result.errors.push_back({RunnerErrorCode::configuration, -1, 0, "program deadlines must be positive and finite"});
+    if (const auto error = validate_execution_configuration(solution, reference, limits)) {
+        result.errors.push_back({RunnerErrorCode::configuration, -1, 0, error->message});
         return result;
     }
-    for (const auto* spec : {&solution, &reference}) {
-        if (spec->executable.empty() || spec->executable.native().find('\0') != std::string::npos
-            || std::any_of(spec->arguments.begin(), spec->arguments.end(), [](const auto& arg) {
-                return arg.find('\0') != std::string::npos;
-            })) {
-            result.errors.push_back({RunnerErrorCode::configuration, -1, 0, "invalid executable path or arguments"});
-            return result;
-        }
-    }
-    std::array<std::uint64_t, 2> start{};
+    struct ProgramState {
+        std::uint64_t start = 0;
+        std::chrono::milliseconds timeout;
+        bool stdout_closed = false;
+        bool stderr_closed = false;
+        bool stopped = false;
+        bool finished = false;
+    };
+    std::array<ProgramState, 2> states{{{0, limits.solution_timeout}, {0, limits.reference_timeout}}};
     const std::array<const ProgramSpec*, 2> specs{&solution, &reference};
-    const std::array<std::chrono::milliseconds, 2> timeouts{limits.solution_timeout, limits.reference_timeout};
-    std::array<bool, 2> stdout_closed{}, stderr_closed{}, stopped{}, finished{};
     std::optional<std::uint64_t> cleanup_start;
     auto stop = [&](int program, StopReason reason) {
         auto& reasons = result.programs[program].stop_reasons;
         if (std::find(reasons.begin(), reasons.end(), reason) == reasons.end()) reasons.push_back(reason);
-        if (!stopped[program]) {
-            stopped[program] = true;
+        if (!states[program].stopped) {
+            states[program].stopped = true;
             if (backend_->pending(program)) {
                 if (!cleanup_start) cleanup_start = backend_->now_ms();
                 if (auto error = backend_->stop(program)) result.errors.push_back(*error);
@@ -263,8 +279,8 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         const auto now = backend_->now_ms();
         for (int program = 0; program < 2; ++program) {
             auto& evidence = result.programs[program];
-            if (!evidence.launched || finished[program] || stopped[program]) continue;
-            if (now - start[program] >= static_cast<std::uint64_t>(timeouts[program].count())) {
+            if (!evidence.launched || states[program].finished || states[program].stopped) continue;
+            if (now - states[program].start >= static_cast<std::uint64_t>(states[program].timeout.count())) {
                 if (!evidence.setup_complete)
                     result.errors.push_back({RunnerErrorCode::launch, program, 0, "deadline expired during setup"});
                 stop(program, StopReason::timeout);
@@ -274,8 +290,8 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     auto enforce_stops = [&] {
         if (cancellation.stop_requested()) result.cancelled = true;
         if (!result.errors.empty() || result.cancelled) {
-            for (int program = 0; program < 2; ++program) if (result.programs[program].launched)
-                stop(program, result.cancelled ? StopReason::cancellation : StopReason::runner_error);
+            for (int program = 0; program < 2; ++program)
+                if (result.programs[program].launched || backend_->pending(program)) stop(program, result.cancelled ? StopReason::cancellation : StopReason::runner_error);
         } else if (detail::execution_unsuccessful(result.programs[0]) && backend_->pending(1)) {
             stop(1, StopReason::peer_failure);
         }
@@ -284,7 +300,7 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         enforce_deadlines();
         enforce_stops();
         if (!result.errors.empty() || result.cancelled) break;
-        start[program] = backend_->now_ms();
+        states[program].start = backend_->now_ms();
         if (auto error = backend_->launch(program, *specs[program], input)) {
             result.errors.push_back(*error);
             break;
@@ -297,7 +313,7 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     while (has_pending_ownership()) {
         enforce_deadlines();
         enforce_stops();
-        if (cleanup_start && !(stopped[0] && backend_->pending(0)) && !(stopped[1] && backend_->pending(1)))
+        if (cleanup_start && !(states[0].stopped && backend_->pending(0)) && !(states[1].stopped && backend_->pending(1)))
             cleanup_start.reset();
         if (cleanup_start && backend_->now_ms() - *cleanup_start >= 1000) {
             result.errors.push_back({RunnerErrorCode::cleanup, -1, 0, "shared one-second cleanup deadline expired"});
@@ -311,9 +327,9 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
             wait_ms = std::min(wait_ms, elapsed >= 1000 ? 0 : 1000 - elapsed);
         }
         for (int program = 0; program < 2; ++program) {
-            if (result.programs[program].launched && !finished[program] && !stopped[program]) {
-                const auto elapsed = now - start[program];
-                const auto limit = static_cast<std::uint64_t>(timeouts[program].count());
+            if (result.programs[program].launched && !states[program].finished && !states[program].stopped) {
+                const auto elapsed = now - states[program].start;
+                const auto limit = static_cast<std::uint64_t>(states[program].timeout.count());
                 wait_ms = std::min(wait_ms, elapsed >= limit ? 0 : limit - elapsed);
             }
         }
@@ -341,8 +357,8 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
                     evidence.stderr_truncated |= event.bytes.size() > remaining;
                     break;
                 }
-                case EventKind::stdout_closed: stdout_closed[event.program] = true; break;
-                case EventKind::stderr_closed: stderr_closed[event.program] = true; break;
+                case EventKind::stdout_closed: states[event.program].stdout_closed = true; break;
+                case EventKind::stderr_closed: states[event.program].stderr_closed = true; break;
                 case EventKind::exited: evidence.exit_code = event.value; evidence.reaped = true; break;
                 case EventKind::signalled: evidence.signal = event.value; evidence.reaped = true; break;
                 case EventKind::error: break;
@@ -351,16 +367,16 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         enforce_stops();
         for (int program = 0; program < 2; ++program) {
             auto& evidence = result.programs[program];
-            if (evidence.launched && !finished[program]) {
-                evidence.elapsed_ms = backend_->now_ms() - start[program];
-                if (!backend_->pending(program)) finished[program] = true;
+            if (evidence.launched && !states[program].finished) {
+                evidence.elapsed_ms = backend_->now_ms() - states[program].start;
+                if (!backend_->pending(program)) states[program].finished = true;
             }
         }
     }
     for (int program = 0; program < 2; ++program) {
         auto& evidence = result.programs[program];
-        if (evidence.launched && !finished[program]) evidence.elapsed_ms = backend_->now_ms() - start[program];
-        evidence.output_complete = stdout_closed[program] && stderr_closed[program];
+        if (evidence.launched && !states[program].finished) evidence.elapsed_ms = backend_->now_ms() - states[program].start;
+        evidence.output_complete = states[program].stdout_closed && states[program].stderr_closed;
         evidence.cleanup_complete = !backend_->pending(program);
     }
     return result;

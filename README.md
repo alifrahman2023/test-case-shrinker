@@ -96,7 +96,8 @@ Each program retains at most 8,388,608 unchanged stdout bytes (one extra byte
 fails execution) and the first 65,536 stderr bytes (extra bytes are drained and
 marked). `Evaluation` owns its output and records disagreement using byte offsets
 and a one-based token position; end-of-output is explicit. It has no ordinary
-outcome on cancellation or operational error. Exit/signal facts remain separate
+outcome on cancellation or operational error. Token scanning and comparison
+also check cancellation in bounded chunks. Exit/signal facts remain separate
 from timeout, overflow, cancellation, and peer-stop reasons. A completed wrong
 answer requires zero exits, complete output, and successful cleanup for both.
 
@@ -106,7 +107,8 @@ handling. Required stops use immediate SIGKILL and a shared maximum one-second
 cleanup wait. If cleanup remains unresolved, the result reports a typed error
 and known process facts, `has_pending_ownership()` remains true, and further
 evaluations are refused. The runner retains the actual process/descriptor
-ownership; diagnostic process identifiers never authorize caller signaling or
+ownership. Uncertain descriptor release also stays pending, without blindly
+retrying a descriptor number that might have been reused. Diagnostic process identifiers never authorize caller signaling or
 reaping. Destroying a runner with pending ownership terminates as a caller
 contract violation, without an indefinite destructor wait. Explicit bounded
 recovery and complete lifecycle integration are the follow-on ownership slice;

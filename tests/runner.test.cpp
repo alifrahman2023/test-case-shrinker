@@ -263,3 +263,17 @@ TEST_CASE("runner never reaps a host-owned child", "[runner]") {
     REQUIRE(WIFEXITED(status));
     REQUIRE(WEXITSTATUS(status) == 23);
 }
+TEST_CASE("partial startup failure kills and reaps the already launched peer", "[runner]") {
+    Workspace workspace;
+    shrink::Runner runner;
+    auto result = shrink::evaluate_candidate(runner, "0\n\n",
+        {SHRINK_PROGRAM_FIXTURE, {"wait", (workspace.directory / "ready").string()}},
+        {workspace.directory / "missing", {}}, {});
+    REQUIRE_FALSE(result.outcome);
+    REQUIRE(result.execution.errors[0].code == shrink::RunnerErrorCode::launch);
+    REQUIRE(result.execution.programs[0].launched);
+    REQUIRE(result.execution.programs[0].signal == SIGKILL);
+    REQUIRE(result.execution.programs[0].reaped);
+    REQUIRE(result.execution.programs[1].reaped);
+    REQUIRE_FALSE(runner.has_pending_ownership());
+}
