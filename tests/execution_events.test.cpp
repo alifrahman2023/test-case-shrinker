@@ -305,3 +305,17 @@ TEST_CASE("failed solution stops the reference before solution output EOF", "[ex
     REQUIRE(observed->stops[0] == 0);
     REQUIRE(result.execution.programs[0].output_complete);
 }
+TEST_CASE("unexpected status errors retain children through termination and reaping", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete},
+                         {0, EventKind::error, {}, EIO, RunnerErrorCode::status, "unexpected nonterminal child status"}}},
+                     {0, completion(0, 0)}, {0, completion(1, 0)}};
+    Runner runner(std::move(script));
+    auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
+    REQUIRE_FALSE(result.outcome);
+    REQUIRE(result.execution.errors[0].code == RunnerErrorCode::status);
+    REQUIRE(observed->stops == std::array{1, 1});
+    REQUIRE(result.execution.programs[0].reaped);
+    REQUIRE(result.execution.programs[1].reaped);
+    REQUIRE_FALSE(runner.has_pending_ownership());
+}

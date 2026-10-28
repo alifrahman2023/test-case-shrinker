@@ -206,8 +206,12 @@ public:
             int status = 0;
             const auto waited = waitpid(child.pid, &status, WNOHANG);
             if (waited == child.pid) {
-                child.pid = -1; // End ownership before any further stop request.
-                close_fd(program, 0, events);
+                // Only terminal status releases ownership. A traced/stopped
+                // child may produce a nonterminal status even without WUNTRACED.
+                if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                    child.pid = -1; // End ownership before any further stop request.
+                    close_fd(program, 0, events);
+                }
                 if (WIFEXITED(status)) events.push_back({program, EventKind::exited, {}, WEXITSTATUS(status)});
                 else if (WIFSIGNALED(status)) events.push_back({program, EventKind::signalled, {}, WTERMSIG(status)});
                 else events.push_back({program, EventKind::error, {}, EIO, RunnerErrorCode::status, "unexpected child status"});
