@@ -1,0 +1,41 @@
+name: Native Mac checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native-mac:
+    name: macOS 15 ARM64 Debug and installed Release
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record baseline and tool versions
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          sw_vers
+          xcrun clang++ --version
+          cmake --version
+      - name: Configure Debug tests
+        run: cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+      - name: Build Debug
+        run: cmake --build build/debug --parallel
+      - name: Run full Debug suite
+        run: ctest --test-dir build/debug --output-on-failure --no-tests=error
+      - name: Configure CLI-only Release
+        run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+      - name: Build and install Release
+        run: |
+          cmake --build build/release --parallel
+          cmake --install build/release --prefix "$RUNNER_TEMP/shrink-install"
+      - name: Check installed command outside build directory
+        run: >-
+          cmake
+          -DSHRINK_EXECUTABLE="$RUNNER_TEMP/shrink-install/bin/shrink"
+          -DCHECK_DIRECTORY="$RUNNER_TEMP/shrink-installed-check"
+          -P tests/check_information.cmake
