@@ -27,4 +27,5 @@ public:
     virtual std::optional<int> process_id(int) const { return {}; }
     virtual PendingOwnership ownership(int program) const = 0;
 };
+std::unique_ptr<ExecutionBackend> make_mac_execution_backend();
 }

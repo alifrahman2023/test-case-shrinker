@@ -1,4 +1,5 @@
 #include "evaluator.hpp"
+#include "runner_backend.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cerrno>
 #include <sys/wait.h>
@@ -19,6 +20,32 @@ struct Workspace {
         directory = path;
     }
     ~Workspace() { std::filesystem::remove_all(directory); }
+};
+// Force initial cleanup expiry without collecting real child statuses. Recovery
+// resumes the same native handles; no fabricated PIDs or assumed scheduling.
+class DeferredStatusCollection final : public shrink::detail::ExecutionBackend {
+    std::unique_ptr<ExecutionBackend> native_ = shrink::detail::make_mac_execution_backend();
+    shrink::CancellationSource cancellation_;
+    std::uint64_t offset_ = 0;
+    bool deferred_ = true;
+public:
+    explicit DeferredStatusCollection(shrink::CancellationSource cancellation)
+        : cancellation_(std::move(cancellation)) {}
+    void resume() { deferred_ = false; }
+    std::uint64_t now_ms() override { return native_->now_ms() + offset_; }
+    std::optional<shrink::RunnerError> launch(int p, const shrink::ProgramSpec& spec, std::string_view input) override {
+        auto error = native_->launch(p, spec, input);
+        if (!error && p == 1) cancellation_.request_stop();
+        return error;
+    }
+    std::vector<shrink::detail::ExecutionEvent> service(shrink::CancellationToken token, int wait_ms) override {
+        if (deferred_) { offset_ += 1000; return {}; }
+        return native_->service(token, wait_ms);
+    }
+    std::optional<shrink::RunnerError> stop(int p) override { return native_->stop(p); }
+    bool pending(int p) const override { return native_->pending(p); }
+    std::optional<int> process_id(int p) const override { return native_->process_id(p); }
+    shrink::PendingOwnership ownership(int p) const override { return native_->ownership(p); }
 };
 shrink::ProgramSpec text(std::string value) {
     return {SHRINK_PROGRAM_FIXTURE, {"text", std::move(value)}};
@@ -248,11 +275,14 @@ TEST_CASE("runner evaluation and cleanup never reap a host-owned child", "[runne
     const auto host = fork();
     REQUIRE(host >= 0);
     if (host == 0) _exit(23);
-    shrink::Runner runner;
-    auto result = shrink::evaluate_candidate(runner, "0\n\n", text("a"), text("b"), {});
-    auto cleanup = runner.cleanup(std::chrono::milliseconds(0));
-    REQUIRE(cleanup.resolved);
-    REQUIRE(cleanup.errors.empty());
+    shrink::CancellationSource cancellation;
+    auto backend = std::make_unique<DeferredStatusCollection>(cancellation);
+    auto* controlled = backend.get();
+    shrink::Runner runner(std::move(backend));
+    auto result = shrink::evaluate_candidate(runner, "0\n\n", text("a"), text("b"), {}, cancellation.token());
+    const auto pending = runner.pending_ownership();
+    controlled->resume();
+    auto cleanup = runner.cleanup();
     int status = 0;
     pid_t waited = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -261,7 +291,16 @@ TEST_CASE("runner evaluation and cleanup never reap a host-owned child", "[runne
         if (waited != 0) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (std::chrono::steady_clock::now() < deadline);
-    REQUIRE(result.outcome == shrink::CandidateOutcome::preserved);
+    REQUIRE_FALSE(result.outcome);
+    REQUIRE(result.execution.errors[0].code == shrink::RunnerErrorCode::cleanup);
+    REQUIRE(pending.size() == 2);
+    REQUIRE(pending[0].awaiting_reap);
+    REQUIRE(pending[1].awaiting_reap);
+    REQUIRE(cleanup.resolved);
+    REQUIRE(cleanup.errors.empty());
+    REQUIRE(cleanup.execution.programs[0].reaped);
+    REQUIRE(cleanup.execution.programs[1].reaped);
+    REQUIRE_FALSE(runner.has_pending_ownership());
     REQUIRE(waited == host);
     REQUIRE(WIFEXITED(status));
     REQUIRE(WEXITSTATUS(status) == 23);

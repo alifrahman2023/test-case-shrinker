@@ -74,7 +74,7 @@ struct CleanupResult {
     ExecutionPair execution; // Owning snapshot; includes the original operational errors.
     std::vector<RunnerError> errors; // Errors from this attempt only.
 };
-namespace detail { class ExecutionBackend; }
+namespace detail { class ExecutionBackend; struct ExecutionEvent; }
 // One synchronous evaluation or cleanup operation at a time. Concurrent calls
 // and reentry are unsupported; only cancellation requests may be concurrent.
 // Hosts must not reap these children or use incompatible SIGCHLD handling.
@@ -102,6 +102,8 @@ public:
 private:
     std::unique_ptr<detail::ExecutionBackend> backend_;
     struct OutputCollection { bool stdout_closed = false; bool stderr_closed = false; };
+    static bool collect_event(ExecutionEvidence& evidence, OutputCollection& collection,
+                              const detail::ExecutionEvent& event);
     std::array<OutputCollection, 2> retained_collection_{};
     ExecutionPair retained_;
 };

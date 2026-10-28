@@ -112,7 +112,8 @@ evaluations are refused. The runner retains the actual process/descriptor
 ownership. Uncertain descriptor release also stays pending, without blindly
 retrying a descriptor number that might have been reused. Diagnostic process identifiers never authorize caller signaling or
 reaping. Destroying a runner with pending ownership terminates as a caller
-contract violation, without an indefinite destructor wait. A continuing host retains and services pending ownership with
+contract violation, without an indefinite destructor wait. A continuing host
+retains and services pending ownership with
 `pending_ownership()` and `cleanup(wait, cancellation)`. Inspection returns owning
 diagnostics for each unresolved role: known process identifier, whether reaping
 is pending, open descriptor count, and uncertain-release count. Diagnostics do

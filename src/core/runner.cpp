@@ -270,7 +270,10 @@ bool ExecutionEvidence::successful() const {
     return launched && setup_complete && output_complete && reaped && cleanup_complete
         && exit_code == 0 && !signal && stop_reasons.empty();
 }
-Runner::Runner() : backend_(std::make_unique<MacExecutionBackend>()) {}
+std::unique_ptr<detail::ExecutionBackend> detail::make_mac_execution_backend() {
+    return std::make_unique<MacExecutionBackend>();
+}
+Runner::Runner() : backend_(detail::make_mac_execution_backend()) {}
 Runner::Runner(std::unique_ptr<detail::ExecutionBackend> backend) : backend_(std::move(backend)) {}
 Runner::~Runner() { if (has_pending_ownership()) std::terminate(); }
 bool Runner::has_pending_ownership() const { return backend_->pending(0) || backend_->pending(1); }
@@ -284,6 +287,35 @@ std::vector<PendingOwnership> Runner::pending_ownership() const {
     }
     return result;
 }
+bool Runner::collect_event(ExecutionEvidence& evidence, OutputCollection& collection,
+                           const detail::ExecutionEvent& event) {
+    bool overflow = false;
+    switch (event.kind) {
+        case EventKind::setup_complete: evidence.setup_complete = true; break;
+        case EventKind::stdout_data: {
+            const auto remaining = stdout_limit - evidence.stdout_bytes.size();
+            evidence.stdout_bytes.append(event.bytes, 0, remaining);
+            overflow = event.bytes.size() > remaining;
+            if (overflow && std::find(evidence.stop_reasons.begin(), evidence.stop_reasons.end(), StopReason::stdout_overflow) == evidence.stop_reasons.end())
+                evidence.stop_reasons.push_back(StopReason::stdout_overflow);
+            break;
+        }
+        case EventKind::stderr_data: {
+            const auto remaining = stderr_limit - evidence.stderr_bytes.size();
+            evidence.stderr_bytes.append(event.bytes, 0, remaining);
+            evidence.stderr_truncated |= event.bytes.size() > remaining;
+            break;
+        }
+        case EventKind::stdout_closed: collection.stdout_closed = true; break;
+        case EventKind::stderr_closed: collection.stderr_closed = true; break;
+        case EventKind::exited: evidence.exit_code = event.value; evidence.reaped = true; break;
+        case EventKind::signalled: evidence.signal = event.value; evidence.reaped = true; break;
+        case EventKind::error: break;
+    }
+    evidence.output_complete = collection.stdout_closed && collection.stderr_closed;
+    return overflow;
+}
+
 CleanupResult Runner::cleanup(std::chrono::milliseconds wait, CancellationToken cancellation) {
     CleanupResult result;
     if (wait.count() < 0 || wait.count() > 1000) {
@@ -308,31 +340,7 @@ CleanupResult Runner::cleanup(std::chrono::milliseconds wait, CancellationToken 
                 result.errors.push_back({event.error_code, event.program, event.value, event.operation});
                 continue;
             }
-            auto& evidence = retained_.programs[event.program];
-            auto& collection = retained_collection_[event.program];
-            switch (event.kind) {
-                case EventKind::setup_complete: evidence.setup_complete = true; break;
-                case EventKind::stdout_data: {
-                    const auto remaining = stdout_limit - evidence.stdout_bytes.size();
-                    evidence.stdout_bytes.append(event.bytes, 0, remaining);
-                    if (event.bytes.size() > remaining
-                        && std::find(evidence.stop_reasons.begin(), evidence.stop_reasons.end(), StopReason::stdout_overflow) == evidence.stop_reasons.end())
-                        evidence.stop_reasons.push_back(StopReason::stdout_overflow);
-                    break;
-                }
-                case EventKind::stderr_data: {
-                    const auto remaining = stderr_limit - evidence.stderr_bytes.size();
-                    evidence.stderr_bytes.append(event.bytes, 0, remaining);
-                    evidence.stderr_truncated |= event.bytes.size() > remaining;
-                    break;
-                }
-                case EventKind::stdout_closed: collection.stdout_closed = true; break;
-                case EventKind::stderr_closed: collection.stderr_closed = true; break;
-                case EventKind::exited: evidence.exit_code = event.value; evidence.reaped = true; break;
-                case EventKind::signalled: evidence.signal = event.value; evidence.reaped = true; break;
-                case EventKind::error: break;
-            }
-            evidence.output_complete = collection.stdout_closed && collection.stderr_closed;
+            collect_event(retained_.programs[event.program], retained_collection_[event.program], event);
         }
         if (!has_pending_ownership()) break;
         result.cancelled = cancellation.stop_requested();
@@ -364,8 +372,7 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     struct ProgramState {
         std::uint64_t start = 0;
         std::chrono::milliseconds timeout;
-        bool stdout_closed = false;
-        bool stderr_closed = false;
+        OutputCollection collection{};
         bool stopped = false;
         bool finished = false;
     };
@@ -450,27 +457,8 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
                 result.errors.push_back({event.error_code, event.program, event.value, event.operation});
                 continue;
             }
-            auto& evidence = result.programs[event.program];
-            switch (event.kind) {
-                case EventKind::setup_complete: evidence.setup_complete = true; break;
-                case EventKind::stdout_data: {
-                    const auto remaining = stdout_limit - evidence.stdout_bytes.size();
-                    evidence.stdout_bytes.append(event.bytes, 0, remaining);
-                    if (event.bytes.size() > remaining) stop(event.program, StopReason::stdout_overflow);
-                    break;
-                }
-                case EventKind::stderr_data: {
-                    const auto remaining = stderr_limit - evidence.stderr_bytes.size();
-                    evidence.stderr_bytes.append(event.bytes, 0, remaining);
-                    evidence.stderr_truncated |= event.bytes.size() > remaining;
-                    break;
-                }
-                case EventKind::stdout_closed: states[event.program].stdout_closed = true; break;
-                case EventKind::stderr_closed: states[event.program].stderr_closed = true; break;
-                case EventKind::exited: evidence.exit_code = event.value; evidence.reaped = true; break;
-                case EventKind::signalled: evidence.signal = event.value; evidence.reaped = true; break;
-                case EventKind::error: break;
-            }
+            if (collect_event(result.programs[event.program], states[event.program].collection, event))
+                stop(event.program, StopReason::stdout_overflow);
         }
         enforce_stops();
         for (int program = 0; program < 2; ++program) {
@@ -484,9 +472,9 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     for (int program = 0; program < 2; ++program) {
         auto& evidence = result.programs[program];
         if (evidence.launched && !states[program].finished) evidence.elapsed_ms = backend_->now_ms() - states[program].start;
-        evidence.output_complete = states[program].stdout_closed && states[program].stderr_closed;
+        evidence.output_complete = states[program].collection.stdout_closed && states[program].collection.stderr_closed;
         evidence.cleanup_complete = !backend_->pending(program);
-        retained_collection_[program] = {states[program].stdout_closed, states[program].stderr_closed};
+        retained_collection_[program] = states[program].collection;
     }
     if (has_pending_ownership()) retained_ = result;
     return result;
