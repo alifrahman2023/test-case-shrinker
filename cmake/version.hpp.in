@@ -1,0 +1,3 @@
+#pragma once
+
+#define SHRINK_VERSION "@PROJECT_VERSION@"
