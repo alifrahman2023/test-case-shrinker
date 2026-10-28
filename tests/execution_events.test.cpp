@@ -12,6 +12,8 @@
 namespace {
 using namespace shrink;
 using namespace shrink::detail;
+constexpr auto solution = ProgramRole::solution;
+constexpr auto reference = ProgramRole::reference;
 struct Step { std::uint64_t elapsed; std::vector<ExecutionEvent> events; };
 class Script final : public ExecutionBackend {
 public:
@@ -27,26 +29,26 @@ public:
     std::array<int, 2> launches{};
     std::vector<int> waits;
     std::array<std::uint64_t, 2> launch_delay{};
-    std::function<void(int)> on_launch;
-    std::optional<int> fail_launch;
-    std::optional<int> fail_stop;
+    std::function<void(ProgramRole)> on_launch;
+    std::optional<ProgramRole> fail_launch;
+    std::optional<ProgramRole> fail_stop;
     std::uint64_t now_ms() override { if (on_clock) on_clock(); return clock; }
-    std::optional<RunnerError> launch(int p, const ProgramSpec&, std::string_view) override {
-        ++launches[p]; clock += launch_delay[p];
+    std::optional<RunnerError> launch(ProgramRole p, const ProgramSpec&, std::string_view) override {
+        ++launches[program_index(p)]; clock += launch_delay[program_index(p)];
         if (fail_launch == p) return RunnerError{RunnerErrorCode::launch, p, ENOENT, "scripted launch"};
-        active[p] = true;
-        completion_parts[p] = 0;
+        active[program_index(p)] = true;
+        completion_parts[program_index(p)] = 0;
         if (on_launch) on_launch(p);
         return {};
     }
-    bool pending(int p) const override { return active[p] || uncertain_close[p]; }
-    PendingOwnership ownership(int p) const override {
-        const auto parts = completion_parts[p];
+    bool pending(ProgramRole p) const override { return active[program_index(p)] || uncertain_close[program_index(p)]; }
+    PendingOwnership ownership(ProgramRole p) const override {
+        const auto parts = completion_parts[program_index(p)];
         const auto descriptors = static_cast<std::size_t>(!(parts & 1)) + !(parts & 2) + !(parts & 4);
-        return {p, 7000 + p, active[p] && !(parts & 8), active[p] ? descriptors : 0, uncertain_close[p] ? 1u : 0u};
+        return {p, (p == solution ? 7000 : 7001), active[program_index(p)] && !(parts & 8), active[program_index(p)] ? descriptors : 0, uncertain_close[program_index(p)] ? 1u : 0u};
     }
-    std::optional<RunnerError> stop(int p) override {
-        ++stops[p]; stopped_at[p] = clock;
+    std::optional<RunnerError> stop(ProgramRole p) override {
+        ++stops[program_index(p)]; stopped_at[program_index(p)] = clock;
         if (fail_stop == p) return RunnerError{RunnerErrorCode::cleanup, p, EPERM, "scripted SIGKILL failure"};
         return {};
     }
@@ -55,40 +57,40 @@ public:
         if (steps.empty()) throw std::runtime_error("script exhausted");
         auto step = std::move(steps.front()); steps.pop_front(); clock += step.elapsed;
         for (const auto& e : step.events) {
-            if (e.program < 0) continue;
-            auto& parts = completion_parts[e.program];
+            if (!e.program) continue;
+            auto& parts = completion_parts[program_index(*e.program)];
             if (e.kind == EventKind::setup_complete || (e.kind == EventKind::error && e.error_code == RunnerErrorCode::launch)) parts |= 1;
             if (e.kind == EventKind::stdout_closed) parts |= 2;
             if (e.kind == EventKind::stderr_closed) parts |= 4;
             if (e.kind == EventKind::exited || e.kind == EventKind::signalled) parts |= 8;
-            if (parts == 15) active[e.program] = false;
+            if (parts == 15) active[program_index(*e.program)] = false;
         }
         if (after_service) after_service();
         return step.events;
     }
 };
-std::vector<ExecutionEvent> completion(int program, int code) {
+std::vector<ExecutionEvent> completion(ProgramRole program, int code) {
     return {{program, EventKind::setup_complete}, {program, EventKind::stdout_closed},
             {program, EventKind::stderr_closed}, {program, EventKind::exited, {}, code}};
 }
 }
 TEST_CASE("solution failure stops its reference promptly in either completion order", "[execution-events]") {
-    for (int first : {0, 1}) {
+    for (const auto first : program_roles) {
         auto script = std::make_unique<Script>(); auto* observed = script.get();
-        script->steps = {{0, completion(first, 7)}, {0, completion(1 - first, 9)}};
+        script->steps = {{0, completion(first, 7)}, {0, completion((first == solution ? reference : solution), 9)}};
         Runner runner(std::move(script));
         auto result = evaluate_candidate(runner, "0\n\n", {"/solution", {}}, {"/reference", {}}, {});
         REQUIRE(result.outcome == CandidateOutcome::lost);
         REQUIRE(observed->stops[0] == 0);
-        REQUIRE(observed->stops[1] == (first == 0 ? 1 : 0));
+        REQUIRE(observed->stops[1] == (first == solution ? 1 : 0));
     }
 }
 TEST_CASE("deadline covers collection and distinguishes pending setup from execution timeout", "[execution-events]") {
     for (bool setup_done : {false, true}) {
         auto script = std::make_unique<Script>();
-        if (setup_done) script->steps.push_back({0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete}}});
-        script->steps.push_back({10, completion(0, 0)});
-        script->steps.push_back({0, completion(1, 0)});
+        if (setup_done) script->steps.push_back({0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}});
+        script->steps.push_back({10, completion(solution, 0)});
+        script->steps.push_back({0, completion(reference, 0)});
         Runner runner(std::move(script));
         RunLimits limits; limits.solution_timeout = std::chrono::milliseconds(10);
         auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
@@ -111,14 +113,15 @@ TEST_CASE("invalid runner configuration is rejected before launching either prog
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::configuration);
+    REQUIRE_FALSE(result.execution.errors[0].program);
     REQUIRE_FALSE(observed->active[0]);
     REQUIRE_FALSE(observed->active[1]);
 }
 TEST_CASE("cancellation after only one launch stops that child and does not launch its peer", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int) { source.request_stop(); };
-    script->steps = {{0, completion(0, 0)}};
+    script->on_launch = [&](ProgramRole) { source.request_stop(); };
+    script->steps = {{0, completion(solution, 0)}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
     REQUIRE(result.execution.cancelled);
@@ -131,7 +134,7 @@ TEST_CASE("cancellation after only one launch stops that child and does not laun
 TEST_CASE("setup includes launch work and expires before launching a peer", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     script->launch_delay[0] = 10;
-    script->steps = {{0, completion(0, 0)}};
+    script->steps = {{0, completion(solution, 0)}};
     Runner runner(std::move(script));
     RunLimits limits; limits.solution_timeout = std::chrono::milliseconds(10);
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
@@ -143,22 +146,25 @@ TEST_CASE("setup includes launch work and expires before launching a peer", "[ex
 TEST_CASE("operational errors override ordinary failure and retain cancellation reasons", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
-    auto failed = completion(0, 7);
-    failed.push_back({1, EventKind::error, {}, EIO, RunnerErrorCode::io, "scripted read failure"});
-    script->steps = {{0, failed}, {0, completion(1, 0)}};
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
+    auto failed = completion(solution, 7);
+    failed.push_back({reference, EventKind::error, {}, EIO, RunnerErrorCode::io, "scripted read failure"});
+    failed.push_back({std::nullopt, EventKind::error, {}, EIO, RunnerErrorCode::io, "scripted poll failure"});
+    script->steps = {{0, failed}, {0, completion(reference, 0)}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.cancelled);
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::io);
+    REQUIRE(result.execution.errors[0].program == reference);
+    REQUIRE_FALSE(result.execution.errors[1].program);
     REQUIRE(result.execution.programs[0].exit_code == 7);
     REQUIRE(observed->stops == std::array{1, 1});
 }
 TEST_CASE("unresolved cleanup has one shared bound and retained ownership blocks new work", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
     script->steps = {{1000, {}}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
@@ -168,7 +174,7 @@ TEST_CASE("unresolved cleanup has one shared bound and retained ownership blocks
     const auto clock = observed->clock;
     // Deliver eventual OS completion through the controlled execution seam.
     // The production runner still owns its backend throughout the failed call.
-    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    observed->steps = {{0, completion(solution, 0)}, {0, completion(reference, 0)}};
     observed->service({}, 0); observed->service({}, 0);
     REQUIRE(pending);
     REQUIRE_FALSE(result.outcome);
@@ -183,8 +189,8 @@ TEST_CASE("unresolved cleanup has one shared bound and retained ownership blocks
 TEST_CASE("cleanup waits never request time past the shared deadline", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
-    auto both = completion(0, 0); auto second = completion(1, 0);
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
+    auto both = completion(solution, 0); auto second = completion(reference, 0);
     both.insert(both.end(), second.begin(), second.end());
     script->steps = {{999, {}}, {1, both}};
     Runner runner(std::move(script));
@@ -193,10 +199,10 @@ TEST_CASE("cleanup waits never request time past the shared deadline", "[executi
     REQUIRE(observed->waits == std::vector<int>{5, 1});
 }
 TEST_CASE("reference failure is inconclusive only when solution succeeds in either order", "[execution-events]") {
-    for (int first : {0, 1}) {
+    for (const auto first : program_roles) {
         auto script = std::make_unique<Script>(); auto* observed = script.get();
-        script->steps = {{0, completion(first, first == 0 ? 0 : 127)},
-                         {0, completion(1 - first, first == 0 ? 127 : 0)}};
+        script->steps = {{0, completion(first, first == solution ? 0 : 127)},
+                         {0, completion((first == solution ? reference : solution), first == solution ? 127 : 0)}};
         Runner runner(std::move(script));
         auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
         REQUIRE(result.execution.errors.empty());
@@ -206,9 +212,9 @@ TEST_CASE("reference failure is inconclusive only when solution succeeds in eith
 }
 TEST_CASE("late operational errors override an already observed ordinary solution failure", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->steps = {{0, completion(0, 7)},
-        {0, {{1, EventKind::error, {}, EACCES, RunnerErrorCode::launch, "exec"}}},
-        {0, completion(1, 127)}};
+    script->steps = {{0, completion(solution, 7)},
+        {0, {{reference, EventKind::error, {}, EACCES, RunnerErrorCode::launch, "exec"}}},
+        {0, completion(reference, 127)}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE_FALSE(result.outcome);
@@ -218,8 +224,8 @@ TEST_CASE("late operational errors override an already observed ordinary solutio
 }
 TEST_CASE("sleep-inclusive clock jumps expire work before newly collected completion", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete}}},
-                     {60'000, {}}, {0, completion(0, 0)}, {0, completion(1, 0)}};
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}},
+                     {60'000, {}}, {0, completion(solution, 0)}, {0, completion(reference, 0)}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE(result.execution.errors.empty());
@@ -230,8 +236,8 @@ TEST_CASE("sleep-inclusive clock jumps expire work before newly collected comple
 }
 TEST_CASE("completed reference cleanup does not shorten the solution execution deadline", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete}}},
-                     {1, {}}, {5, completion(1, 0)}, {2000, {}}, {0, completion(0, 0)}};
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}},
+                     {1, {}}, {5, completion(reference, 0)}, {2000, {}}, {0, completion(solution, 0)}};
     Runner runner(std::move(script));
     RunLimits limits; limits.reference_timeout = std::chrono::milliseconds(1);
     limits.solution_timeout = std::chrono::seconds(10);
@@ -243,11 +249,11 @@ TEST_CASE("completed reference cleanup does not shorten the solution execution d
 }
 TEST_CASE("buffered output after exit must complete before wrong-answer acceptance", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete},
-                         {0, EventKind::stdout_data, "1"}, {1, EventKind::stdout_data, "1.0"},
-                         {0, EventKind::exited, {}, 0}, {1, EventKind::exited, {}, 0}}},
-                     {0, {{0, EventKind::stdout_data, ".0"}, {0, EventKind::stdout_closed}, {0, EventKind::stderr_closed},
-                          {1, EventKind::stdout_closed}, {1, EventKind::stderr_closed}}}};
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete},
+                         {solution, EventKind::stdout_data, "1"}, {reference, EventKind::stdout_data, "1.0"},
+                         {solution, EventKind::exited, {}, 0}, {reference, EventKind::exited, {}, 0}}},
+                     {0, {{solution, EventKind::stdout_data, ".0"}, {solution, EventKind::stdout_closed}, {solution, EventKind::stderr_closed},
+                          {reference, EventKind::stdout_closed}, {reference, EventKind::stderr_closed}}}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE(result.outcome == CandidateOutcome::lost);
@@ -258,10 +264,10 @@ TEST_CASE("buffered output after exit must complete before wrong-answer acceptan
 }
 TEST_CASE("output collection remains deadline-bound after a zero exit", "[execution-events]") {
     auto script = std::make_unique<Script>();
-    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete},
-                         {0, EventKind::exited, {}, 0}}},
-                     {10, {{0, EventKind::stdout_data, "a"}, {0, EventKind::stdout_closed}, {0, EventKind::stderr_closed}}},
-                     {0, completion(1, 0)}};
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete},
+                         {solution, EventKind::exited, {}, 0}}},
+                     {10, {{solution, EventKind::stdout_data, "a"}, {solution, EventKind::stdout_closed}, {solution, EventKind::stderr_closed}}},
+                     {0, completion(reference, 0)}};
     Runner runner(std::move(script));
     RunLimits limits; limits.solution_timeout = std::chrono::milliseconds(10);
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
@@ -272,15 +278,15 @@ TEST_CASE("output collection remains deadline-bound after a zero exit", "[execut
 }
 TEST_CASE("cancellation arriving after collection prevents output classification", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    std::vector<ExecutionEvent> both{{0, EventKind::stdout_data, "1"}, {1, EventKind::stdout_data, "1.0"}};
-    auto first = completion(0, 0); auto second = completion(1, 0);
+    std::vector<ExecutionEvent> both{{solution, EventKind::stdout_data, "1"}, {reference, EventKind::stdout_data, "1.0"}};
+    auto first = completion(solution, 0); auto second = completion(reference, 0);
     both.insert(both.end(), first.begin(), first.end());
     both.insert(both.end(), second.begin(), second.end());
     script->steps = {{0, both}};
     CancellationSource source;
     int collection_clock_reads = 0;
     script->on_clock = [&] {
-        if (observed->launches == std::array{1, 1} && !observed->pending(0) && !observed->pending(1)
+        if (observed->launches == std::array{1, 1} && !observed->pending(solution) && !observed->pending(reference)
             && ++collection_clock_reads == 2) source.request_stop();
     };
     Runner runner(std::move(script));
@@ -292,10 +298,10 @@ TEST_CASE("cancellation arriving after collection prevents output classification
 }
 TEST_CASE("uncertain descriptor release retains ownership despite reaped zero exits", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->on_launch = [&](int p) { if (p == 0) observed->uncertain_close[0] = true; };
-    auto events = completion(0, 0); auto reference = completion(1, 0);
-    events.insert(events.end(), reference.begin(), reference.end());
-    events.push_back({0, EventKind::error, {}, EINTR, RunnerErrorCode::cleanup, "descriptor release uncertain"});
+    script->on_launch = [&](ProgramRole p) { if (p == solution) observed->uncertain_close[0] = true; };
+    auto events = completion(solution, 0); auto reference_events = completion(reference, 0);
+    events.insert(events.end(), reference_events.begin(), reference_events.end());
+    events.push_back({solution, EventKind::error, {}, EINTR, RunnerErrorCode::cleanup, "descriptor release uncertain"});
     script->steps = {{0, events}, {1000, {}}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
@@ -312,10 +318,10 @@ TEST_CASE("uncertain descriptor release retains ownership despite reaped zero ex
 }
 TEST_CASE("failed solution stops the reference before solution output EOF", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete},
-                         {0, EventKind::exited, {}, 7}}},
-                     {100, {{0, EventKind::stdout_closed}, {0, EventKind::stderr_closed}}},
-                     {0, completion(1, 0)}};
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete},
+                         {solution, EventKind::exited, {}, 7}}},
+                     {100, {{solution, EventKind::stdout_closed}, {solution, EventKind::stderr_closed}}},
+                     {0, completion(reference, 0)}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE(result.outcome == CandidateOutcome::lost);
@@ -325,9 +331,9 @@ TEST_CASE("failed solution stops the reference before solution output EOF", "[ex
 }
 TEST_CASE("unexpected status errors retain children through termination and reaping", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->steps = {{0, {{0, EventKind::setup_complete}, {1, EventKind::setup_complete},
-                         {0, EventKind::error, {}, EIO, RunnerErrorCode::status, "unexpected nonterminal child status"}}},
-                     {0, completion(0, 0)}, {0, completion(1, 0)}};
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete},
+                         {solution, EventKind::error, {}, EIO, RunnerErrorCode::status, "unexpected nonterminal child status"}}},
+                     {0, completion(solution, 0)}, {0, completion(reference, 0)}};
     Runner runner(std::move(script));
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE_FALSE(result.outcome);
@@ -340,16 +346,16 @@ TEST_CASE("unexpected status errors retain children through termination and reap
 TEST_CASE("bounded recovery resolves retained children without changing the original error", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
-    script->steps = {{0, {{0, EventKind::stdout_data, "retained"}}}, {1000, {}}};
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
+    script->steps = {{0, {{solution, EventKind::stdout_data, "retained"}}}, {1000, {}}};
     Runner runner(std::move(script));
     auto original = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
     const auto pending = runner.pending_ownership();
-    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    observed->steps = {{0, completion(solution, 0)}, {0, completion(reference, 0)}};
     auto recovered = runner.cleanup();
     REQUIRE(pending.size() == 2);
-    REQUIRE(pending[0].program == 0);
-    REQUIRE(pending[1].program == 1);
+    REQUIRE(pending[0].program == solution);
+    REQUIRE(pending[1].program == reference);
     REQUIRE(recovered.resolved);
     REQUIRE(recovered.errors.empty());
     REQUIRE(recovered.execution.programs[0].reaped);
@@ -362,7 +368,7 @@ TEST_CASE("bounded recovery resolves retained children without changing the orig
     REQUIRE(recovered.execution.programs[0].stdout_bytes == "retained");
     REQUIRE(observed->launches == std::array{1, 1});
     observed->on_launch = {};
-    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    observed->steps = {{0, completion(solution, 0)}, {0, completion(reference, 0)}};
     auto next = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE(next.outcome == CandidateOutcome::lost);
     REQUIRE(original.execution.programs[0].stdout_bytes == "retained");
@@ -371,7 +377,7 @@ TEST_CASE("bounded recovery resolves retained children without changing the orig
 TEST_CASE("each recovery attempt shares its bound and leaves unresolved ownership inspectable", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
     script->steps = {{1000, {}}};
     Runner runner(std::move(script));
     auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
@@ -379,7 +385,7 @@ TEST_CASE("each recovery attempt shares its bound and leaves unresolved ownershi
     auto expired = runner.cleanup(std::chrono::milliseconds(100));
     const auto pending = runner.pending_ownership();
     auto refused = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {});
-    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    observed->steps = {{0, completion(solution, 0)}, {0, completion(reference, 0)}};
     auto recovered = runner.cleanup();
     REQUIRE_FALSE(expired.resolved);
     REQUIRE(expired.errors[0].code == RunnerErrorCode::cleanup);
@@ -397,12 +403,12 @@ TEST_CASE("each recovery attempt shares its bound and leaves unresolved ownershi
 TEST_CASE("recovery retains cancellation observed with final resource completion", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource initial, retry;
-    script->on_launch = [&](int p) { if (p == 1) initial.request_stop(); };
+    script->on_launch = [&](ProgramRole p) { if (p == reference) initial.request_stop(); };
     script->steps = {{1000, {}}};
     Runner runner(std::move(script));
     auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, initial.token());
-    auto events = completion(0, 0); auto reference = completion(1, 0);
-    events.insert(events.end(), reference.begin(), reference.end());
+    auto events = completion(solution, 0); auto reference_events = completion(reference, 0);
+    events.insert(events.end(), reference_events.begin(), reference_events.end());
     observed->steps = {{0, events}};
     observed->after_service = [&] { retry.request_stop(); };
     auto result = runner.cleanup(std::chrono::milliseconds(100), retry.token());
@@ -414,10 +420,10 @@ TEST_CASE("recovery retains cancellation observed with final resource completion
 }
 TEST_CASE("recovery can resolve descriptor ownership after reaping without relaunching", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
-    script->on_launch = [&](int p) { if (p == 0) observed->uncertain_close[0] = true; };
-    auto events = completion(0, 0); auto reference = completion(1, 0);
-    events.insert(events.end(), reference.begin(), reference.end());
-    events.push_back({0, EventKind::error, {}, EINTR, RunnerErrorCode::cleanup, "uncertain close"});
+    script->on_launch = [&](ProgramRole p) { if (p == solution) observed->uncertain_close[0] = true; };
+    auto events = completion(solution, 0); auto reference_events = completion(reference, 0);
+    events.insert(events.end(), reference_events.begin(), reference_events.end());
+    events.push_back({solution, EventKind::error, {}, EINTR, RunnerErrorCode::cleanup, "uncertain close"});
     script->steps = {{0, events}, {1000, {}}};
     Runner runner(std::move(script));
     auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {});
@@ -438,8 +444,8 @@ TEST_CASE("recovery can resolve descriptor ownership after reaping without relau
 TEST_CASE("cancelled recovery intercepts waits and only stops still-owned programs", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource initial, retry;
-    script->on_launch = [&](int p) { if (p == 1) initial.request_stop(); };
-    script->steps = {{0, completion(0, 0)}, {1000, {}}};
+    script->on_launch = [&](ProgramRole p) { if (p == reference) initial.request_stop(); };
+    script->steps = {{0, completion(solution, 0)}, {1000, {}}};
     Runner runner(std::move(script));
     runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, initial.token());
     retry.request_stop();
@@ -447,7 +453,7 @@ TEST_CASE("cancelled recovery intercepts waits and only stops still-owned progra
     auto cancelled = runner.cleanup(std::chrono::milliseconds(1000), retry.token());
     const auto stopped_after_cancel = observed->stops;
     const auto pending = runner.pending_ownership();
-    observed->steps = {{0, completion(1, 0)}};
+    observed->steps = {{0, completion(reference, 0)}};
     auto recovered = runner.cleanup();
     REQUIRE_FALSE(cancelled.resolved);
     REQUIRE(cancelled.cancelled);
@@ -455,7 +461,7 @@ TEST_CASE("cancelled recovery intercepts waits and only stops still-owned progra
     REQUIRE(observed->waits[2] == 0);
     REQUIRE(stopped_after_cancel == std::array{1, 2});
     REQUIRE(pending.size() == 1);
-    REQUIRE(pending[0].program == 1);
+    REQUIRE(pending[0].program == reference);
     REQUIRE(recovered.resolved);
     REQUIRE_FALSE(recovered.cancelled);
     REQUIRE(observed->launches == std::array{1, 1});
@@ -467,7 +473,7 @@ TEST_CASE("destroying a runner with pending ownership invokes the contract check
         std::set_terminate([] { _exit(86); });
         auto script = std::make_unique<Script>();
         CancellationSource source;
-        script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+        script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
         script->steps = {{1000, {}}};
         {
             Runner runner(std::move(script));
@@ -499,7 +505,7 @@ TEST_CASE("destroying a runner with pending ownership invokes the contract check
 TEST_CASE("invalid cleanup bounds leave pending executions untouched", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
     script->steps = {{1000, {}}};
     Runner runner(std::move(script));
     runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
@@ -507,8 +513,8 @@ TEST_CASE("invalid cleanup bounds leave pending executions untouched", "[executi
     auto excessive = runner.cleanup(std::chrono::milliseconds(1001));
     const auto stops = observed->stops;
     const auto waits = observed->waits.size();
-    auto events = completion(0, 0); auto reference = completion(1, 0);
-    events.insert(events.end(), reference.begin(), reference.end());
+    auto events = completion(solution, 0); auto reference_events = completion(reference, 0);
+    events.insert(events.end(), reference_events.begin(), reference_events.end());
     observed->steps = {{0, events}};
     auto resolved = runner.cleanup(std::chrono::milliseconds(0));
     REQUIRE(negative.errors[0].code == RunnerErrorCode::configuration);
@@ -523,22 +529,22 @@ TEST_CASE("invalid cleanup bounds leave pending executions untouched", "[executi
 TEST_CASE("failed recovery termination can be retried without erasing either error result", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     CancellationSource source;
-    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
-    script->fail_stop = 0;
+    script->on_launch = [&](ProgramRole p) { if (p == reference) source.request_stop(); };
+    script->fail_stop = solution;
     script->steps = {{1000, {}}};
     Runner runner(std::move(script));
     auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
-    observed->steps = {{0, completion(1, 0)}, {1000, {}}};
+    observed->steps = {{0, completion(reference, 0)}, {1000, {}}};
     auto failed = runner.cleanup();
     const auto pending = runner.pending_ownership();
     observed->fail_stop.reset();
-    observed->steps = {{0, completion(0, 0)}};
+    observed->steps = {{0, completion(solution, 0)}};
     auto recovered = runner.cleanup();
     REQUIRE_FALSE(failed.resolved);
     REQUIRE(failed.errors[0].system_error == EPERM);
     REQUIRE(failed.errors[1].code == RunnerErrorCode::cleanup);
     REQUIRE(pending.size() == 1);
-    REQUIRE(pending[0].program == 0);
+    REQUIRE(pending[0].program == solution);
     REQUIRE(recovered.resolved);
     REQUIRE(recovered.errors.empty());
     REQUIRE(recovered.execution.errors[0].system_error == EPERM);

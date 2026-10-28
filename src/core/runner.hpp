@@ -29,11 +29,13 @@ private:
 inline constexpr std::size_t stdout_limit = 8'388'608;
 inline constexpr std::size_t stderr_limit = 65'536;
 
+enum class ProgramRole { solution, reference };
+
 enum class StopReason { timeout, stdout_overflow, cancellation, peer_failure, runner_error };
 enum class RunnerErrorCode { configuration, launch, io, status, cleanup, pending_ownership };
 struct RunnerError {
     RunnerErrorCode code;
-    int program; // 0 solution, 1 reference, -1 whole runner
+    std::optional<ProgramRole> program; // No role for whole-run errors.
     int system_error = 0;
     std::string operation;
 };
@@ -62,7 +64,7 @@ struct ExecutionPair {
 };
 
 struct PendingOwnership {
-    int program;
+    ProgramRole program;
     std::optional<int> process_id; // Diagnostic only; ownership stays with Runner.
     bool awaiting_reap = false;
     std::size_t open_descriptors = 0;

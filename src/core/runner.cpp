@@ -17,6 +17,8 @@ namespace shrink {
 namespace {
 using detail::EventKind;
 using detail::ExecutionEvent;
+using detail::program_index;
+using detail::program_roles;
 
 enum class Stream { input, output, error, setup };
 constexpr std::array streams{Stream::input, Stream::output, Stream::error, Stream::setup};
@@ -40,14 +42,14 @@ class MacExecutionBackend final : public detail::ExecutionBackend {
     // A failed close can leave release uncertain. Keep responsibility and block
     // reuse of the runner; never retry a number that another thread may reuse.
     std::array<std::vector<int>, 2> uncertain_closes_;
-    int close_owned(int program, int fd) {
+    int close_owned(ProgramRole program, int fd) {
         if (close(fd) == 0) return 0;
         const int error = errno;
-        uncertain_closes_[program].push_back(fd);
+        uncertain_closes_[program_index(program)].push_back(fd);
         return error;
     }
 
-    bool configure(int program, int& fd) {
+    bool configure(ProgramRole program, int& fd) {
         if (fd < 3) {
             const int replacement = fcntl(fd, F_DUPFD_CLOEXEC, 3);
             const int saved = errno;
@@ -58,8 +60,8 @@ class MacExecutionBackend final : public detail::ExecutionBackend {
         }
         return fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
     }
-    void close_fd(int program, Stream stream, std::vector<ExecutionEvent>& events) {
-        int& fd = children_[program].descriptor(stream);
+    void close_fd(ProgramRole program, Stream stream, std::vector<ExecutionEvent>& events) {
+        int& fd = children_[program_index(program)].descriptor(stream);
         if (fd < 0) return;
         const int owned = fd;
         fd = -1;
@@ -73,20 +75,20 @@ public:
         return static_cast<std::uint64_t>(static_cast<long double>(mach_continuous_time())
                                          * timebase_.numer / timebase_.denom / 1'000'000);
     }
-    std::optional<int> process_id(int program) const override { return children_[program].pid; }
-    PendingOwnership ownership(int program) const override {
-        const auto& child = children_[program];
+    std::optional<int> process_id(ProgramRole program) const override { return children_[program_index(program)].pid; }
+    PendingOwnership ownership(ProgramRole program) const override {
+        const auto& child = children_[program_index(program)];
         return {program, child.pid > 0 ? std::optional<int>(child.pid) : std::nullopt, child.pid > 0,
                 static_cast<std::size_t>(std::count_if(child.descriptors.begin(), child.descriptors.end(), [](int fd) { return fd >= 0; })),
-                uncertain_closes_[program].size()};
+                uncertain_closes_[program_index(program)].size()};
     }
-    bool pending(int program) const override {
-        const auto& child = children_[program];
-        return child.pid > 0 || !uncertain_closes_[program].empty()
+    bool pending(ProgramRole program) const override {
+        const auto& child = children_[program_index(program)];
+        return child.pid > 0 || !uncertain_closes_[program_index(program)].empty()
             || std::any_of(child.descriptors.begin(), child.descriptors.end(), [](int fd) { return fd >= 0; });
     }
-    std::optional<RunnerError> launch(int program, const ProgramSpec& spec, std::string_view input) override {
-        auto& child = children_[program];
+    std::optional<RunnerError> launch(ProgramRole program, const ProgramSpec& spec, std::string_view input) override {
+        auto& child = children_[program_index(program)];
         child = Child{};
         child.input = input;
         std::vector<std::string> arguments{spec.executable.string()};
@@ -103,7 +105,7 @@ public:
                 const int closed = close_owned(program, fd);
                 if (closed) cleanup_error = closed;
             }
-            if (cleanup_error || !uncertain_closes_[program].empty())
+            if (cleanup_error || !uncertain_closes_[program_index(program)].empty())
                 return RunnerError{RunnerErrorCode::cleanup, program, cleanup_error ? cleanup_error : error,
                                    std::string("descriptor release uncertain after ") + operation};
             return RunnerError{RunnerErrorCode::launch, program, error, operation};
@@ -158,10 +160,10 @@ public:
     std::vector<ExecutionEvent> service(CancellationToken, int wait_ms) override {
         auto events = std::move(deferred_);
         deferred_.clear();
-        for (int program = 0; program < 2; ++program) {
+        for (const auto program : program_roles) {
             // A missing descriptor proves release. An occupied number may have
             // been reused: inspect it read-only and never blindly close it again.
-            std::erase_if(uncertain_closes_[program], [&](int fd) {
+            std::erase_if(uncertain_closes_[program_index(program)], [&](int fd) {
                 if (fcntl(fd, F_GETFD) >= 0) return false;
                 const int error = errno;
                 if (error == EBADF) return true;
@@ -171,9 +173,9 @@ public:
             });
         }
         std::vector<pollfd> descriptors;
-        std::vector<std::pair<int, Stream>> locations;
-        for (int program = 0; program < 2; ++program) {
-            auto& child = children_[program];
+        std::vector<std::pair<ProgramRole, Stream>> locations;
+        for (const auto program : program_roles) {
+            auto& child = children_[program_index(program)];
             if (child.descriptor(Stream::input) >= 0 && child.sent == child.input.size()) close_fd(program, Stream::input, events);
             for (const auto stream : streams) if (child.descriptor(stream) >= 0) {
                 descriptors.push_back({child.descriptor(stream), static_cast<short>(stream == Stream::input ? POLLOUT : POLLIN), 0});
@@ -181,11 +183,11 @@ public:
             }
         }
         const int ready = poll(descriptors.data(), static_cast<nfds_t>(descriptors.size()), wait_ms);
-        if (ready < 0 && errno != EINTR) events.push_back({-1, EventKind::error, {}, errno, RunnerErrorCode::io, "poll"});
+        if (ready < 0 && errno != EINTR) events.push_back({std::nullopt, EventKind::error, {}, errno, RunnerErrorCode::io, "poll"});
         for (std::size_t index = 0; index < descriptors.size(); ++index) {
             if (!descriptors[index].revents) continue;
             const auto [program, stream] = locations[index];
-            auto& child = children_[program];
+            auto& child = children_[program_index(program)];
             if (descriptors[index].revents & POLLNVAL) {
                 events.push_back({program, EventKind::error, {}, EBADF, RunnerErrorCode::io, "poll descriptor"});
                 close_fd(program, stream, events);
@@ -226,8 +228,8 @@ public:
                 close_fd(program, stream, events);
             }
         }
-        for (int program = 0; program < 2; ++program) {
-            auto& child = children_[program];
+        for (const auto program : program_roles) {
+            auto& child = children_[program_index(program)];
             if (child.pid <= 0) continue;
             int status = 0;
             const auto waited = waitpid(child.pid, &status, WNOHANG);
@@ -251,8 +253,8 @@ public:
         }
         return events;
     }
-    std::optional<RunnerError> stop(int program) override {
-        auto& child = children_[program];
+    std::optional<RunnerError> stop(ProgramRole program) override {
+        auto& child = children_[program_index(program)];
         std::vector<ExecutionEvent> events;
         close_fd(program, Stream::input, events);
         deferred_.insert(deferred_.end(), events.begin(), events.end());
@@ -276,13 +278,13 @@ std::unique_ptr<detail::ExecutionBackend> detail::make_mac_execution_backend() {
 Runner::Runner() : backend_(detail::make_mac_execution_backend()) {}
 Runner::Runner(std::unique_ptr<detail::ExecutionBackend> backend) : backend_(std::move(backend)) {}
 Runner::~Runner() { if (has_pending_ownership()) std::terminate(); }
-bool Runner::has_pending_ownership() const { return backend_->pending(0) || backend_->pending(1); }
+bool Runner::has_pending_ownership() const { return backend_->pending(ProgramRole::solution) || backend_->pending(ProgramRole::reference); }
 
 std::vector<PendingOwnership> Runner::pending_ownership() const {
     std::vector<PendingOwnership> result;
-    for (int program = 0; program < 2; ++program) if (backend_->pending(program)) {
+    for (const auto program : program_roles) if (backend_->pending(program)) {
         auto ownership = backend_->ownership(program);
-        if (!ownership.process_id) ownership.process_id = retained_.programs[program].process_id;
+        if (!ownership.process_id) ownership.process_id = retained_.programs[program_index(program)].process_id;
         result.push_back(ownership);
     }
     return result;
@@ -319,14 +321,14 @@ bool Runner::collect_event(ExecutionEvidence& evidence, OutputCollection& collec
 CleanupResult Runner::cleanup(std::chrono::milliseconds wait, CancellationToken cancellation) {
     CleanupResult result;
     if (wait.count() < 0 || wait.count() > 1000) {
-        result.errors.push_back({RunnerErrorCode::configuration, -1, 0, "cleanup wait must be between zero and one second"});
+        result.errors.push_back({RunnerErrorCode::configuration, std::nullopt, 0, "cleanup wait must be between zero and one second"});
         result.resolved = !has_pending_ownership();
         result.cancelled = cancellation.stop_requested();
         result.execution = retained_;
         return result;
     }
     const auto start = backend_->now_ms();
-    for (int program = 0; program < 2; ++program) if (backend_->pending(program)) {
+    for (const auto program : program_roles) if (backend_->pending(program)) {
         if (auto error = backend_->stop(program)) result.errors.push_back(*error);
     }
     while (has_pending_ownership()) {
@@ -340,16 +342,16 @@ CleanupResult Runner::cleanup(std::chrono::milliseconds wait, CancellationToken 
                 result.errors.push_back({event.error_code, event.program, event.value, event.operation});
                 continue;
             }
-            collect_event(retained_.programs[event.program], retained_collection_[event.program], event);
+            collect_event(retained_.programs[program_index(*event.program)], retained_collection_[program_index(*event.program)], event);
         }
         if (!has_pending_ownership()) break;
         result.cancelled = cancellation.stop_requested();
         if (result.cancelled || backend_->now_ms() - start >= static_cast<std::uint64_t>(wait.count())) {
-            if (!result.cancelled) result.errors.push_back({RunnerErrorCode::cleanup, -1, 0, "bounded cleanup attempt expired"});
+            if (!result.cancelled) result.errors.push_back({RunnerErrorCode::cleanup, std::nullopt, 0, "bounded cleanup attempt expired"});
             break;
         }
     }
-    for (int program = 0; program < 2; ++program) retained_.programs[program].cleanup_complete = !backend_->pending(program);
+    for (const auto program : program_roles) retained_.programs[program_index(program)].cleanup_complete = !backend_->pending(program);
     result.resolved = !has_pending_ownership();
     result.cancelled = cancellation.stop_requested();
     result.execution = retained_;
@@ -360,11 +362,11 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
                           const ProgramSpec& reference, const RunLimits& limits, CancellationToken cancellation) {
     ExecutionPair result;
     if (has_pending_ownership()) {
-        result.errors.push_back({RunnerErrorCode::pending_ownership, -1, 0, "runner retains prior execution"});
+        result.errors.push_back({RunnerErrorCode::pending_ownership, std::nullopt, 0, "runner retains prior execution"});
         return result;
     }
     if (const auto error = validate_execution_configuration(solution, reference, limits)) {
-        result.errors.push_back({RunnerErrorCode::configuration, -1, 0, error->message});
+        result.errors.push_back({RunnerErrorCode::configuration, std::nullopt, 0, error->message});
         return result;
     }
     retained_ = {};
@@ -379,11 +381,12 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     std::array<ProgramState, 2> states{{{0, limits.solution_timeout}, {0, limits.reference_timeout}}};
     const std::array<const ProgramSpec*, 2> specs{&solution, &reference};
     std::optional<std::uint64_t> cleanup_start;
-    auto stop = [&](int program, StopReason reason) {
-        auto& reasons = result.programs[program].stop_reasons;
+    auto stop = [&](ProgramRole program, StopReason reason) {
+        auto& reasons = result.programs[program_index(program)].stop_reasons;
         if (std::find(reasons.begin(), reasons.end(), reason) == reasons.end()) reasons.push_back(reason);
-        if (!states[program].stopped) {
-            states[program].stopped = true;
+        auto& state = states[program_index(program)];
+        if (!state.stopped) {
+            state.stopped = true;
             if (backend_->pending(program)) {
                 if (!cleanup_start) cleanup_start = backend_->now_ms();
                 if (auto error = backend_->stop(program)) result.errors.push_back(*error);
@@ -392,10 +395,11 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     };
     auto enforce_deadlines = [&] {
         const auto now = backend_->now_ms();
-        for (int program = 0; program < 2; ++program) {
-            auto& evidence = result.programs[program];
-            if (!evidence.launched || states[program].finished || states[program].stopped) continue;
-            if (now - states[program].start >= static_cast<std::uint64_t>(states[program].timeout.count())) {
+        for (const auto program : program_roles) {
+            auto& evidence = result.programs[program_index(program)];
+            const auto& state = states[program_index(program)];
+            if (!evidence.launched || state.finished || state.stopped) continue;
+            if (now - state.start >= static_cast<std::uint64_t>(state.timeout.count())) {
                 if (!evidence.setup_complete)
                     result.errors.push_back({RunnerErrorCode::launch, program, 0, "deadline expired during setup"});
                 stop(program, StopReason::timeout);
@@ -405,33 +409,36 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     auto enforce_stops = [&] {
         if (cancellation.stop_requested()) result.cancelled = true;
         if (!result.errors.empty() || result.cancelled) {
-            for (int program = 0; program < 2; ++program)
-                if (result.programs[program].launched || backend_->pending(program)) stop(program, result.cancelled ? StopReason::cancellation : StopReason::runner_error);
-        } else if (result.programs[0].unsuccessful() && backend_->pending(1)) {
-            stop(1, StopReason::peer_failure);
+            for (const auto program : program_roles)
+                if (result.programs[program_index(program)].launched || backend_->pending(program)) stop(program, result.cancelled ? StopReason::cancellation : StopReason::runner_error);
+        } else if (result.programs[program_index(ProgramRole::solution)].unsuccessful()
+                   && backend_->pending(ProgramRole::reference)) {
+            stop(ProgramRole::reference, StopReason::peer_failure);
         }
     };
-    for (int program = 0; program < 2; ++program) {
+    for (const auto program : program_roles) {
         enforce_deadlines();
         enforce_stops();
         if (!result.errors.empty() || result.cancelled) break;
-        states[program].start = backend_->now_ms();
-        if (auto error = backend_->launch(program, *specs[program], input)) {
+        states[program_index(program)].start = backend_->now_ms();
+        if (auto error = backend_->launch(program, *specs[program_index(program)], input)) {
             result.errors.push_back(*error);
             break;
         }
-        result.programs[program].launched = true;
-        result.programs[program].process_id = backend_->process_id(program);
+        result.programs[program_index(program)].launched = true;
+        result.programs[program_index(program)].process_id = backend_->process_id(program);
     }
     enforce_deadlines();
     enforce_stops();
     while (has_pending_ownership()) {
         enforce_deadlines();
         enforce_stops();
-        if (cleanup_start && !(states[0].stopped && backend_->pending(0)) && !(states[1].stopped && backend_->pending(1)))
+        if (cleanup_start
+            && !(states[program_index(ProgramRole::solution)].stopped && backend_->pending(ProgramRole::solution))
+            && !(states[program_index(ProgramRole::reference)].stopped && backend_->pending(ProgramRole::reference)))
             cleanup_start.reset();
         if (cleanup_start && backend_->now_ms() - *cleanup_start >= 1000) {
-            result.errors.push_back({RunnerErrorCode::cleanup, -1, 0, "shared one-second cleanup deadline expired"});
+            result.errors.push_back({RunnerErrorCode::cleanup, std::nullopt, 0, "shared one-second cleanup deadline expired"});
             enforce_stops(); // Stop a still-running peer even when cleanup cannot wait further.
             break;
         }
@@ -441,10 +448,11 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
             const auto elapsed = now - *cleanup_start;
             wait_ms = std::min(wait_ms, elapsed >= 1000 ? 0 : 1000 - elapsed);
         }
-        for (int program = 0; program < 2; ++program) {
-            if (result.programs[program].launched && !states[program].finished && !states[program].stopped) {
-                const auto elapsed = now - states[program].start;
-                const auto limit = static_cast<std::uint64_t>(states[program].timeout.count());
+        for (const auto program : program_roles) {
+            const auto& state = states[program_index(program)];
+            if (result.programs[program_index(program)].launched && !state.finished && !state.stopped) {
+                const auto elapsed = now - state.start;
+                const auto limit = static_cast<std::uint64_t>(state.timeout.count());
                 wait_ms = std::min(wait_ms, elapsed >= limit ? 0 : limit - elapsed);
             }
         }
@@ -457,24 +465,26 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
                 result.errors.push_back({event.error_code, event.program, event.value, event.operation});
                 continue;
             }
-            if (collect_event(result.programs[event.program], states[event.program].collection, event))
-                stop(event.program, StopReason::stdout_overflow);
+            if (collect_event(result.programs[program_index(*event.program)], states[program_index(*event.program)].collection, event))
+                stop(*event.program, StopReason::stdout_overflow);
         }
         enforce_stops();
-        for (int program = 0; program < 2; ++program) {
-            auto& evidence = result.programs[program];
-            if (evidence.launched && !states[program].finished) {
-                evidence.elapsed_ms = backend_->now_ms() - states[program].start;
-                if (!backend_->pending(program)) states[program].finished = true;
+        for (const auto program : program_roles) {
+            auto& evidence = result.programs[program_index(program)];
+            auto& state = states[program_index(program)];
+            if (evidence.launched && !state.finished) {
+                evidence.elapsed_ms = backend_->now_ms() - state.start;
+                if (!backend_->pending(program)) state.finished = true;
             }
         }
     }
-    for (int program = 0; program < 2; ++program) {
-        auto& evidence = result.programs[program];
-        if (evidence.launched && !states[program].finished) evidence.elapsed_ms = backend_->now_ms() - states[program].start;
-        evidence.output_complete = states[program].collection.stdout_closed && states[program].collection.stderr_closed;
+    for (const auto program : program_roles) {
+        auto& evidence = result.programs[program_index(program)];
+        const auto& state = states[program_index(program)];
+        if (evidence.launched && !state.finished) evidence.elapsed_ms = backend_->now_ms() - state.start;
+        evidence.output_complete = state.collection.stdout_closed && state.collection.stderr_closed;
         evidence.cleanup_complete = !backend_->pending(program);
-        retained_collection_[program] = states[program].collection;
+        retained_collection_[program_index(program)] = state.collection;
     }
     if (has_pending_ownership()) retained_ = result;
     return result;

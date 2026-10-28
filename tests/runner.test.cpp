@@ -33,19 +33,19 @@ public:
         : cancellation_(std::move(cancellation)) {}
     void resume() { deferred_ = false; }
     std::uint64_t now_ms() override { return native_->now_ms() + offset_; }
-    std::optional<shrink::RunnerError> launch(int p, const shrink::ProgramSpec& spec, std::string_view input) override {
+    std::optional<shrink::RunnerError> launch(shrink::ProgramRole p, const shrink::ProgramSpec& spec, std::string_view input) override {
         auto error = native_->launch(p, spec, input);
-        if (!error && p == 1) cancellation_.request_stop();
+        if (!error && p == shrink::ProgramRole::reference) cancellation_.request_stop();
         return error;
     }
     std::vector<shrink::detail::ExecutionEvent> service(shrink::CancellationToken token, int wait_ms) override {
         if (deferred_) { offset_ += 1000; return {}; }
         return native_->service(token, wait_ms);
     }
-    std::optional<shrink::RunnerError> stop(int p) override { return native_->stop(p); }
-    bool pending(int p) const override { return native_->pending(p); }
-    std::optional<int> process_id(int p) const override { return native_->process_id(p); }
-    shrink::PendingOwnership ownership(int p) const override { return native_->ownership(p); }
+    std::optional<shrink::RunnerError> stop(shrink::ProgramRole p) override { return native_->stop(p); }
+    bool pending(shrink::ProgramRole p) const override { return native_->pending(p); }
+    std::optional<int> process_id(shrink::ProgramRole p) const override { return native_->process_id(p); }
+    shrink::PendingOwnership ownership(shrink::ProgramRole p) const override { return native_->ownership(p); }
 };
 shrink::ProgramSpec text(std::string value) {
     return {SHRINK_PROGRAM_FIXTURE, {"text", std::move(value)}};
@@ -118,6 +118,7 @@ TEST_CASE("real exit 127 and signal facts remain distinct from exec failure", "[
     REQUIRE_FALSE(missing.execution.errors.empty());
     REQUIRE(missing.execution.errors[0].code == shrink::RunnerErrorCode::launch);
     REQUIRE(missing.execution.errors[0].system_error == ENOENT);
+    REQUIRE(missing.execution.errors[0].program == shrink::ProgramRole::reference);
     auto signalled = shrink::evaluate_candidate(runner, "0\n\n",
         {SHRINK_PROGRAM_FIXTURE, {"signal", std::to_string(SIGTERM)}}, text("1"), {});
     REQUIRE(signalled.outcome == shrink::CandidateOutcome::lost);
