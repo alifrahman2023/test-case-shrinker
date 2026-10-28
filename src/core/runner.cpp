@@ -1,5 +1,4 @@
 #include "runner_backend.hpp"
-#include "evaluator.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -19,10 +18,19 @@ namespace {
 using detail::EventKind;
 using detail::ExecutionEvent;
 
+enum class Stream { input, output, error, setup };
+constexpr std::array streams{Stream::input, Stream::output, Stream::error, Stream::setup};
+constexpr std::size_t stream_index(Stream stream) { return static_cast<std::size_t>(stream); }
+constexpr std::size_t read_end = 0;
+constexpr std::size_t write_end = 1;
+constexpr std::size_t parent_end(Stream stream) { return stream == Stream::input ? write_end : read_end; }
+constexpr std::size_t child_end(Stream stream) { return stream == Stream::input ? read_end : write_end; }
+
 class MacExecutionBackend final : public detail::ExecutionBackend {
     struct Child {
         pid_t pid = -1; // Only unreaped, exclusively owned direct children.
-        std::array<int, 4> fd{-1, -1, -1, -1}; // stdin, stdout, stderr, setup
+        std::array<int, streams.size()> descriptors{-1, -1, -1, -1};
+        int& descriptor(Stream stream) { return descriptors[stream_index(stream)]; }
         std::string_view input;
         std::size_t sent = 0;
         std::string setup_bytes;
@@ -50,8 +58,8 @@ class MacExecutionBackend final : public detail::ExecutionBackend {
         }
         return fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
     }
-    void close_fd(int program, int stream, std::vector<ExecutionEvent>& events) {
-        int& fd = children_[program].fd[stream];
+    void close_fd(int program, Stream stream, std::vector<ExecutionEvent>& events) {
+        int& fd = children_[program].descriptor(stream);
         if (fd < 0) return;
         const int owned = fd;
         fd = -1;
@@ -69,7 +77,7 @@ public:
     bool pending(int program) const override {
         const auto& child = children_[program];
         return child.pid > 0 || !uncertain_closes_[program].empty()
-            || std::any_of(child.fd.begin(), child.fd.end(), [](int fd) { return fd >= 0; });
+            || std::any_of(child.descriptors.begin(), child.descriptors.end(), [](int fd) { return fd >= 0; });
     }
     std::optional<RunnerError> launch(int program, const ProgramSpec& spec, std::string_view input) override {
         auto& child = children_[program];
@@ -80,8 +88,9 @@ public:
         std::vector<char*> argv;
         for (auto& argument : arguments) argv.push_back(argument.data());
         argv.push_back(nullptr);
-        std::array<std::array<int, 2>, 4> pipes;
+        std::array<std::array<int, 2>, streams.size()> pipes;
         for (auto& pair : pipes) pair = {-1, -1};
+        auto pipe_for = [&](Stream stream) -> std::array<int, 2>& { return pipes[stream_index(stream)]; };
         auto fail = [&](int error, const char* operation) -> std::optional<RunnerError> {
             int cleanup_error = 0;
             for (auto& pair : pipes) for (int fd : pair) if (fd >= 0) {
@@ -93,17 +102,17 @@ public:
                                    std::string("descriptor release uncertain after ") + operation};
             return RunnerError{RunnerErrorCode::launch, program, error, operation};
         };
-        for (int stream = 0; stream < 4; ++stream) {
-            const int result = stream == 0 ? socketpair(AF_UNIX, SOCK_STREAM, 0, pipes[stream].data())
-                                           : pipe(pipes[stream].data());
+        for (const auto stream : streams) {
+            const int result = stream == Stream::input ? socketpair(AF_UNIX, SOCK_STREAM, 0, pipe_for(stream).data())
+                                           : pipe(pipe_for(stream).data());
             if (result < 0) return fail(errno, "create pipe");
-            for (auto& fd : pipes[stream]) if (!configure(program, fd)) return fail(errno, "configure descriptor");
-            const int parent = pipes[stream][stream == 0 ? 1 : 0];
+            for (auto& fd : pipe_for(stream)) if (!configure(program, fd)) return fail(errno, "configure descriptor");
+            const int parent = pipe_for(stream)[parent_end(stream)];
             const int flags = fcntl(parent, F_GETFL);
             if (flags < 0 || fcntl(parent, F_SETFL, flags | O_NONBLOCK) < 0) return fail(errno, "nonblocking descriptor");
         }
         const int enabled = 1;
-        if (setsockopt(pipes[0][1], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) < 0)
+        if (setsockopt(pipe_for(Stream::input)[write_end], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) < 0)
             return fail(errno, "suppress input SIGPIPE");
         const auto pid = fork();
         if (pid < 0) return fail(errno, "fork");
@@ -111,9 +120,9 @@ public:
             // Only async-signal-safe operations between fork and exec. No signal
             // masks/dispositions were changed by the runner, so none leak.
             int error = 0;
-            if (dup2(pipes[0][0], STDIN_FILENO) < 0 || dup2(pipes[1][1], STDOUT_FILENO) < 0
-                || dup2(pipes[2][1], STDERR_FILENO) < 0) error = errno;
-            const int setup = pipes[3][1];
+            if (dup2(pipe_for(Stream::input)[read_end], STDIN_FILENO) < 0 || dup2(pipe_for(Stream::output)[write_end], STDOUT_FILENO) < 0
+                || dup2(pipe_for(Stream::error)[write_end], STDERR_FILENO) < 0) error = errno;
+            const int setup = pipe_for(Stream::setup)[write_end];
             for (const auto& pair : pipes) for (int fd : pair) if (fd != setup) {
                 if (close(fd) < 0 && !error) error = errno;
             }
@@ -132,10 +141,9 @@ public:
             _exit(127);
         }
         child.pid = pid;
-        for (int stream = 0; stream < 4; ++stream) {
-            const int parent_end = stream == 0 ? 1 : 0;
-            child.fd[stream] = pipes[stream][parent_end];
-            if (const int error = close_owned(program, pipes[stream][1 - parent_end]))
+        for (const auto stream : streams) {
+            child.descriptor(stream) = pipe_for(stream)[parent_end(stream)];
+            if (const int error = close_owned(program, pipe_for(stream)[child_end(stream)]))
                 deferred_.push_back({program, EventKind::error, {}, error, RunnerErrorCode::cleanup, "close unused descriptor"});
         }
         return {};
@@ -145,12 +153,12 @@ public:
         auto events = std::move(deferred_);
         deferred_.clear();
         std::vector<pollfd> descriptors;
-        std::vector<std::pair<int, int>> locations;
+        std::vector<std::pair<int, Stream>> locations;
         for (int program = 0; program < 2; ++program) {
             auto& child = children_[program];
-            if (child.fd[0] >= 0 && child.sent == child.input.size()) close_fd(program, 0, events);
-            for (int stream = 0; stream < 4; ++stream) if (child.fd[stream] >= 0) {
-                descriptors.push_back({child.fd[stream], static_cast<short>(stream == 0 ? POLLOUT : POLLIN), 0});
+            if (child.descriptor(Stream::input) >= 0 && child.sent == child.input.size()) close_fd(program, Stream::input, events);
+            for (const auto stream : streams) if (child.descriptor(stream) >= 0) {
+                descriptors.push_back({child.descriptor(stream), static_cast<short>(stream == Stream::input ? POLLOUT : POLLIN), 0});
                 locations.emplace_back(program, stream);
             }
         }
@@ -165,21 +173,21 @@ public:
                 close_fd(program, stream, events);
                 continue;
             }
-            if (stream == 0) {
-                const auto count = write(child.fd[0], child.input.data() + child.sent,
+            if (stream == Stream::input) {
+                const auto count = write(child.descriptor(Stream::input), child.input.data() + child.sent,
                                          std::min<std::size_t>(16384, child.input.size() - child.sent));
                 if (count > 0) child.sent += static_cast<std::size_t>(count);
-                else if (count < 0 && errno == EPIPE) close_fd(program, 0, events);
+                else if (count < 0 && errno == EPIPE) close_fd(program, Stream::input, events);
                 else if (count < 0 && errno != EINTR && errno != EAGAIN) {
                     events.push_back({program, EventKind::error, {}, errno, RunnerErrorCode::io, "write input"});
-                    close_fd(program, 0, events);
+                    close_fd(program, Stream::input, events);
                 }
                 continue;
             }
             char buffer[16384];
-            const auto count = read(child.fd[stream], buffer, sizeof(buffer));
+            const auto count = read(child.descriptor(stream), buffer, sizeof(buffer));
             if (count > 0) {
-                if (stream == 3) {
+                if (stream == Stream::setup) {
                     child.setup_bytes.append(buffer, static_cast<std::size_t>(count));
                     if (child.setup_bytes.size() >= sizeof(int)) {
                         int error;
@@ -187,13 +195,13 @@ public:
                         events.push_back({program, EventKind::error, {}, error, RunnerErrorCode::launch, "child setup/exec"});
                         close_fd(program, stream, events);
                     }
-                } else events.push_back({program, stream == 1 ? EventKind::stdout_data : EventKind::stderr_data,
+                } else events.push_back({program, stream == Stream::output ? EventKind::stdout_data : EventKind::stderr_data,
                                          std::string(buffer, static_cast<std::size_t>(count))});
             } else if (count == 0) {
-                if (stream == 3 && !child.setup_bytes.empty())
+                if (stream == Stream::setup && !child.setup_bytes.empty())
                     events.push_back({program, EventKind::error, {}, EIO, RunnerErrorCode::launch, "incomplete setup report"});
-                else events.push_back({program, stream == 3 ? EventKind::setup_complete
-                                              : stream == 1 ? EventKind::stdout_closed : EventKind::stderr_closed, {}});
+                else events.push_back({program, stream == Stream::setup ? EventKind::setup_complete
+                                              : stream == Stream::output ? EventKind::stdout_closed : EventKind::stderr_closed, {}});
                 close_fd(program, stream, events);
             } else if (errno != EINTR && errno != EAGAIN) {
                 events.push_back({program, EventKind::error, {}, errno, RunnerErrorCode::io, "read output/setup"});
@@ -210,7 +218,7 @@ public:
                 // child may produce a nonterminal status even without WUNTRACED.
                 if (WIFEXITED(status) || WIFSIGNALED(status)) {
                     child.pid = -1; // End ownership before any further stop request.
-                    close_fd(program, 0, events);
+                    close_fd(program, Stream::input, events);
                 }
                 if (WIFEXITED(status)) events.push_back({program, EventKind::exited, {}, WEXITSTATUS(status)});
                 else if (WIFSIGNALED(status)) events.push_back({program, EventKind::signalled, {}, WTERMSIG(status)});
@@ -228,7 +236,7 @@ public:
     std::optional<RunnerError> stop(int program) override {
         auto& child = children_[program];
         std::vector<ExecutionEvent> events;
-        close_fd(program, 0, events);
+        close_fd(program, Stream::input, events);
         deferred_.insert(deferred_.end(), events.begin(), events.end());
         if (child.pid > 0 && kill(child.pid, SIGKILL) < 0 && errno != ESRCH)
             return RunnerError{RunnerErrorCode::cleanup, program, errno, "SIGKILL"};
@@ -237,6 +245,9 @@ public:
 };
 }
 
+bool ExecutionEvidence::unsuccessful() const {
+    return (exit_code && *exit_code != 0) || signal || !stop_reasons.empty();
+}
 bool ExecutionEvidence::successful() const {
     return launched && setup_complete && output_complete && reaped && cleanup_complete
         && exit_code == 0 && !signal && stop_reasons.empty();
@@ -296,7 +307,7 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         if (!result.errors.empty() || result.cancelled) {
             for (int program = 0; program < 2; ++program)
                 if (result.programs[program].launched || backend_->pending(program)) stop(program, result.cancelled ? StopReason::cancellation : StopReason::runner_error);
-        } else if (detail::execution_unsuccessful(result.programs[0]) && backend_->pending(1)) {
+        } else if (result.programs[0].unsuccessful() && backend_->pending(1)) {
             stop(1, StopReason::peer_failure);
         }
     };

@@ -52,6 +52,8 @@ struct ExecutionEvidence {
     std::string stderr_bytes;
     std::vector<StopReason> stop_reasons;
     bool successful() const;
+    // Pending execution is neither successful nor unsuccessful.
+    bool unsuccessful() const;
 };
 struct ExecutionPair {
     std::array<ExecutionEvidence, 2> programs;

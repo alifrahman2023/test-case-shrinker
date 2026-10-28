@@ -1,10 +1,6 @@
 #include "evaluator.hpp"
 
 namespace shrink {
-bool detail::execution_unsuccessful(const ExecutionEvidence& evidence) {
-    return (evidence.exit_code && *evidence.exit_code != 0) || evidence.signal
-        || !evidence.stop_reasons.empty();
-}
 namespace {
 bool whitespace(unsigned char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';

@@ -2,7 +2,6 @@
 #include "runner.hpp"
 
 namespace shrink {
-namespace detail { bool execution_unsuccessful(const ExecutionEvidence& evidence); }
 enum class CandidateOutcome { preserved, lost, inconclusive };
 struct TokenLocation {
     std::size_t offset;
