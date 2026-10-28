@@ -13,7 +13,7 @@ Build and test natively:
 
 ```sh
 cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build/debug --parallel
+cmake --build build/debug --parallel 3
 ctest --test-dir build/debug --output-on-failure --no-tests=error
 ```
 
@@ -30,7 +30,7 @@ Build and install the optimized command without Catch2:
 
 ```sh
 cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-cmake --build build/release --parallel
+cmake --build build/release --parallel 3
 cmake --install build/release --prefix "$HOME/.local"
 ```
 

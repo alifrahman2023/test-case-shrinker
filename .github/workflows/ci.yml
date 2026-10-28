@@ -24,14 +24,14 @@ jobs:
       - name: Configure Debug tests
         run: cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
       - name: Build Debug
-        run: cmake --build build/debug --parallel
+        run: cmake --build build/debug --parallel 3
       - name: Run full Debug suite
         run: ctest --test-dir build/debug --output-on-failure --no-tests=error
       - name: Configure CLI-only Release
         run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
       - name: Build and install Release
         run: |
-          cmake --build build/release --parallel
+          cmake --build build/release --parallel 3
           cmake --install build/release --prefix "$RUNNER_TEMP/shrink-install"
       - name: Check installed command outside build directory
         run: >-
