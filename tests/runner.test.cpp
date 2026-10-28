@@ -244,12 +244,15 @@ TEST_CASE("explicit paths inherit working directory and environment with literal
     REQUIRE_FALSE(no_lookup.outcome);
     REQUIRE(no_lookup.execution.errors[0].system_error == ENOENT);
 }
-TEST_CASE("runner never reaps a host-owned child", "[runner]") {
+TEST_CASE("runner evaluation and cleanup never reap a host-owned child", "[runner]") {
     const auto host = fork();
     REQUIRE(host >= 0);
     if (host == 0) _exit(23);
     shrink::Runner runner;
     auto result = shrink::evaluate_candidate(runner, "0\n\n", text("a"), text("b"), {});
+    auto cleanup = runner.cleanup(std::chrono::milliseconds(0));
+    REQUIRE(cleanup.resolved);
+    REQUIRE(cleanup.errors.empty());
     int status = 0;
     pid_t waited = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);

@@ -25,5 +25,6 @@ public:
     virtual std::optional<RunnerError> stop(int program) = 0;
     virtual bool pending(int program) const = 0;
     virtual std::optional<int> process_id(int) const { return {}; }
+    virtual PendingOwnership ownership(int program) const = 0;
 };
 }

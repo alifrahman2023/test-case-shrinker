@@ -74,6 +74,12 @@ public:
                                          * timebase_.numer / timebase_.denom / 1'000'000);
     }
     std::optional<int> process_id(int program) const override { return children_[program].pid; }
+    PendingOwnership ownership(int program) const override {
+        const auto& child = children_[program];
+        return {program, child.pid > 0 ? std::optional<int>(child.pid) : std::nullopt, child.pid > 0,
+                static_cast<std::size_t>(std::count_if(child.descriptors.begin(), child.descriptors.end(), [](int fd) { return fd >= 0; })),
+                uncertain_closes_[program].size()};
+    }
     bool pending(int program) const override {
         const auto& child = children_[program];
         return child.pid > 0 || !uncertain_closes_[program].empty()
@@ -152,6 +158,18 @@ public:
     std::vector<ExecutionEvent> service(CancellationToken, int wait_ms) override {
         auto events = std::move(deferred_);
         deferred_.clear();
+        for (int program = 0; program < 2; ++program) {
+            // A missing descriptor proves release. An occupied number may have
+            // been reused: inspect it read-only and never blindly close it again.
+            std::erase_if(uncertain_closes_[program], [&](int fd) {
+                if (fcntl(fd, F_GETFD) >= 0) return false;
+                const int error = errno;
+                if (error == EBADF) return true;
+                if (error != EINTR) events.push_back({program, EventKind::error, {}, error,
+                                                     RunnerErrorCode::cleanup, "inspect uncertain descriptor"});
+                return false;
+            });
+        }
         std::vector<pollfd> descriptors;
         std::vector<std::pair<int, Stream>> locations;
         for (int program = 0; program < 2; ++program) {
@@ -257,6 +275,79 @@ Runner::Runner(std::unique_ptr<detail::ExecutionBackend> backend) : backend_(std
 Runner::~Runner() { if (has_pending_ownership()) std::terminate(); }
 bool Runner::has_pending_ownership() const { return backend_->pending(0) || backend_->pending(1); }
 
+std::vector<PendingOwnership> Runner::pending_ownership() const {
+    std::vector<PendingOwnership> result;
+    for (int program = 0; program < 2; ++program) if (backend_->pending(program)) {
+        auto ownership = backend_->ownership(program);
+        if (!ownership.process_id) ownership.process_id = retained_.programs[program].process_id;
+        result.push_back(ownership);
+    }
+    return result;
+}
+CleanupResult Runner::cleanup(std::chrono::milliseconds wait, CancellationToken cancellation) {
+    CleanupResult result;
+    if (wait.count() < 0 || wait.count() > 1000) {
+        result.errors.push_back({RunnerErrorCode::configuration, -1, 0, "cleanup wait must be between zero and one second"});
+        result.resolved = !has_pending_ownership();
+        result.cancelled = cancellation.stop_requested();
+        result.execution = retained_;
+        return result;
+    }
+    const auto start = backend_->now_ms();
+    for (int program = 0; program < 2; ++program) if (backend_->pending(program)) {
+        if (auto error = backend_->stop(program)) result.errors.push_back(*error);
+    }
+    while (has_pending_ownership()) {
+        const auto elapsed = backend_->now_ms() - start;
+        result.cancelled = cancellation.stop_requested();
+        const auto limit = static_cast<std::uint64_t>(wait.count());
+        const int wait_ms = result.cancelled || elapsed >= limit ? 0
+            : static_cast<int>(std::min<std::uint64_t>(5, limit - elapsed));
+        for (const auto& event : backend_->service(cancellation, wait_ms)) {
+            if (event.kind == EventKind::error) {
+                result.errors.push_back({event.error_code, event.program, event.value, event.operation});
+                continue;
+            }
+            auto& evidence = retained_.programs[event.program];
+            auto& collection = retained_collection_[event.program];
+            switch (event.kind) {
+                case EventKind::setup_complete: evidence.setup_complete = true; break;
+                case EventKind::stdout_data: {
+                    const auto remaining = stdout_limit - evidence.stdout_bytes.size();
+                    evidence.stdout_bytes.append(event.bytes, 0, remaining);
+                    if (event.bytes.size() > remaining
+                        && std::find(evidence.stop_reasons.begin(), evidence.stop_reasons.end(), StopReason::stdout_overflow) == evidence.stop_reasons.end())
+                        evidence.stop_reasons.push_back(StopReason::stdout_overflow);
+                    break;
+                }
+                case EventKind::stderr_data: {
+                    const auto remaining = stderr_limit - evidence.stderr_bytes.size();
+                    evidence.stderr_bytes.append(event.bytes, 0, remaining);
+                    evidence.stderr_truncated |= event.bytes.size() > remaining;
+                    break;
+                }
+                case EventKind::stdout_closed: collection.stdout_closed = true; break;
+                case EventKind::stderr_closed: collection.stderr_closed = true; break;
+                case EventKind::exited: evidence.exit_code = event.value; evidence.reaped = true; break;
+                case EventKind::signalled: evidence.signal = event.value; evidence.reaped = true; break;
+                case EventKind::error: break;
+            }
+            evidence.output_complete = collection.stdout_closed && collection.stderr_closed;
+        }
+        if (!has_pending_ownership()) break;
+        result.cancelled = cancellation.stop_requested();
+        if (result.cancelled || backend_->now_ms() - start >= static_cast<std::uint64_t>(wait.count())) {
+            if (!result.cancelled) result.errors.push_back({RunnerErrorCode::cleanup, -1, 0, "bounded cleanup attempt expired"});
+            break;
+        }
+    }
+    for (int program = 0; program < 2; ++program) retained_.programs[program].cleanup_complete = !backend_->pending(program);
+    result.resolved = !has_pending_ownership();
+    result.cancelled = cancellation.stop_requested();
+    result.execution = retained_;
+    return result;
+}
+
 ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
                           const ProgramSpec& reference, const RunLimits& limits, CancellationToken cancellation) {
     ExecutionPair result;
@@ -268,6 +359,8 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         result.errors.push_back({RunnerErrorCode::configuration, -1, 0, error->message});
         return result;
     }
+    retained_ = {};
+    retained_collection_ = {};
     struct ProgramState {
         std::uint64_t start = 0;
         std::chrono::milliseconds timeout;
@@ -393,7 +486,9 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         if (evidence.launched && !states[program].finished) evidence.elapsed_ms = backend_->now_ms() - states[program].start;
         evidence.output_complete = states[program].stdout_closed && states[program].stderr_closed;
         evidence.cleanup_complete = !backend_->pending(program);
+        retained_collection_[program] = {states[program].stdout_closed, states[program].stderr_closed};
     }
+    if (has_pending_ownership()) retained_ = result;
     return result;
 }
 }

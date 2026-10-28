@@ -61,10 +61,25 @@ struct ExecutionPair {
     bool cancelled = false;
 };
 
+struct PendingOwnership {
+    int program;
+    std::optional<int> process_id; // Diagnostic only; ownership stays with Runner.
+    bool awaiting_reap = false;
+    std::size_t open_descriptors = 0;
+    std::size_t uncertain_descriptors = 0;
+};
+struct CleanupResult {
+    bool resolved = false;
+    bool cancelled = false; // This attempt's cancellation, independent of prior execution.
+    ExecutionPair execution; // Owning snapshot; includes the original operational errors.
+    std::vector<RunnerError> errors; // Errors from this attempt only.
+};
 namespace detail { class ExecutionBackend; }
-// Synchronous, one evaluation at a time. Hosts must not reap these children or
-// use incompatible SIGCHLD handling. Retain this runner if ownership is pending.
-// Destruction with pending ownership is a contract violation (terminates).
+// One synchronous evaluation or cleanup operation at a time. Concurrent calls
+// and reentry are unsupported; only cancellation requests may be concurrent.
+// Hosts must not reap these children or use incompatible SIGCHLD handling.
+// A continuing host retains/services pending ownership. Destruction while it
+// remains pending is a contract violation (terminates without waiting).
 class Runner {
 public:
     Runner();
@@ -76,7 +91,18 @@ public:
                       const ProgramSpec& reference, const RunLimits& limits,
                       CancellationToken cancellation = {});
     bool has_pending_ownership() const;
+    std::vector<PendingOwnership> pending_ownership() const;
+    // Retry only existing ownership: never launches programs. One shared wait
+    // for both programs, from zero through one second. Zero makes one nonblocking
+    // pass; cancellation intercepts waits without abandoning resources.
+    // Kernel operations/scheduling are not hard-bounded. Prior results stay owned
+    // by their caller; this attempt returns a new snapshot and never erases errors.
+    CleanupResult cleanup(std::chrono::milliseconds wait = std::chrono::milliseconds(1000),
+                          CancellationToken cancellation = {});
 private:
     std::unique_ptr<detail::ExecutionBackend> backend_;
+    struct OutputCollection { bool stdout_closed = false; bool stderr_closed = false; };
+    std::array<OutputCollection, 2> retained_collection_{};
+    ExecutionPair retained_;
 };
 }

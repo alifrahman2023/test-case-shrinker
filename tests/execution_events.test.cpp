@@ -3,6 +3,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include <deque>
 #include <functional>
+#include <exception>
+#include <thread>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
 using namespace shrink;
@@ -16,6 +21,7 @@ public:
     std::array<unsigned, 2> completion_parts{};
     std::array<bool, 2> uncertain_close{};
     std::function<void()> on_clock;
+    std::function<void()> after_service;
     std::array<int, 2> stops{};
     std::array<std::optional<std::uint64_t>, 2> stopped_at{};
     std::array<int, 2> launches{};
@@ -23,16 +29,27 @@ public:
     std::array<std::uint64_t, 2> launch_delay{};
     std::function<void(int)> on_launch;
     std::optional<int> fail_launch;
+    std::optional<int> fail_stop;
     std::uint64_t now_ms() override { if (on_clock) on_clock(); return clock; }
     std::optional<RunnerError> launch(int p, const ProgramSpec&, std::string_view) override {
         ++launches[p]; clock += launch_delay[p];
         if (fail_launch == p) return RunnerError{RunnerErrorCode::launch, p, ENOENT, "scripted launch"};
         active[p] = true;
+        completion_parts[p] = 0;
         if (on_launch) on_launch(p);
         return {};
     }
     bool pending(int p) const override { return active[p] || uncertain_close[p]; }
-    std::optional<RunnerError> stop(int p) override { ++stops[p]; stopped_at[p] = clock; return {}; }
+    PendingOwnership ownership(int p) const override {
+        const auto parts = completion_parts[p];
+        const auto descriptors = static_cast<std::size_t>(!(parts & 1)) + !(parts & 2) + !(parts & 4);
+        return {p, 7000 + p, active[p] && !(parts & 8), active[p] ? descriptors : 0, uncertain_close[p] ? 1u : 0u};
+    }
+    std::optional<RunnerError> stop(int p) override {
+        ++stops[p]; stopped_at[p] = clock;
+        if (fail_stop == p) return RunnerError{RunnerErrorCode::cleanup, p, EPERM, "scripted SIGKILL failure"};
+        return {};
+    }
     std::vector<ExecutionEvent> service(CancellationToken, int wait_ms) override {
         waits.push_back(wait_ms);
         if (steps.empty()) throw std::runtime_error("script exhausted");
@@ -46,6 +63,7 @@ public:
             if (e.kind == EventKind::exited || e.kind == EventKind::signalled) parts |= 8;
             if (parts == 15) active[e.program] = false;
         }
+        if (after_service) after_service();
         return step.events;
     }
 };
@@ -318,4 +336,214 @@ TEST_CASE("unexpected status errors retain children through termination and reap
     REQUIRE(result.execution.programs[0].reaped);
     REQUIRE(result.execution.programs[1].reaped);
     REQUIRE_FALSE(runner.has_pending_ownership());
+}
+TEST_CASE("bounded recovery resolves retained children without changing the original error", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource source;
+    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->steps = {{0, {{0, EventKind::stdout_data, "retained"}}}, {1000, {}}};
+    Runner runner(std::move(script));
+    auto original = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
+    const auto pending = runner.pending_ownership();
+    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    auto recovered = runner.cleanup();
+    REQUIRE(pending.size() == 2);
+    REQUIRE(pending[0].program == 0);
+    REQUIRE(pending[1].program == 1);
+    REQUIRE(recovered.resolved);
+    REQUIRE(recovered.errors.empty());
+    REQUIRE(recovered.execution.programs[0].reaped);
+    REQUIRE(recovered.execution.programs[1].cleanup_complete);
+    REQUIRE_FALSE(runner.has_pending_ownership());
+    REQUIRE_FALSE(original.outcome);
+    REQUIRE(original.execution.errors[0].code == RunnerErrorCode::cleanup);
+    REQUIRE_FALSE(original.execution.programs[0].cleanup_complete);
+    REQUIRE(recovered.execution.errors[0].code == RunnerErrorCode::cleanup);
+    REQUIRE(recovered.execution.programs[0].stdout_bytes == "retained");
+    REQUIRE(observed->launches == std::array{1, 1});
+    observed->on_launch = {};
+    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    auto next = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
+    REQUIRE(next.outcome == CandidateOutcome::lost);
+    REQUIRE(original.execution.programs[0].stdout_bytes == "retained");
+    REQUIRE(recovered.execution.programs[0].stdout_bytes == "retained");
+}
+TEST_CASE("each recovery attempt shares its bound and leaves unresolved ownership inspectable", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource source;
+    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->steps = {{1000, {}}};
+    Runner runner(std::move(script));
+    auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
+    observed->steps = {{99, {}}, {1, {}}};
+    auto expired = runner.cleanup(std::chrono::milliseconds(100));
+    const auto pending = runner.pending_ownership();
+    auto refused = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {});
+    observed->steps = {{0, completion(0, 0)}, {0, completion(1, 0)}};
+    auto recovered = runner.cleanup();
+    REQUIRE_FALSE(expired.resolved);
+    REQUIRE(expired.errors[0].code == RunnerErrorCode::cleanup);
+    REQUIRE(observed->waits[1] == 5);
+    REQUIRE(observed->waits[2] == 1);
+    REQUIRE(pending.size() == 2);
+    REQUIRE(pending[0].awaiting_reap);
+    REQUIRE(pending[0].open_descriptors == 3);
+    REQUIRE(pending[0].process_id == 7000);
+    REQUIRE(refused.errors[0].code == RunnerErrorCode::pending_ownership);
+    REQUIRE(recovered.resolved);
+    REQUIRE(original.errors[0].code == RunnerErrorCode::cleanup);
+    REQUIRE(observed->launches == std::array{1, 1});
+}
+TEST_CASE("recovery retains cancellation observed with final resource completion", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource initial, retry;
+    script->on_launch = [&](int p) { if (p == 1) initial.request_stop(); };
+    script->steps = {{1000, {}}};
+    Runner runner(std::move(script));
+    auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, initial.token());
+    auto events = completion(0, 0); auto reference = completion(1, 0);
+    events.insert(events.end(), reference.begin(), reference.end());
+    observed->steps = {{0, events}};
+    observed->after_service = [&] { retry.request_stop(); };
+    auto result = runner.cleanup(std::chrono::milliseconds(100), retry.token());
+    REQUIRE(result.resolved);
+    REQUIRE(result.cancelled);
+    REQUIRE(result.errors.empty());
+    REQUIRE(original.cancelled);
+    REQUIRE(original.errors[0].code == RunnerErrorCode::cleanup);
+}
+TEST_CASE("recovery can resolve descriptor ownership after reaping without relaunching", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    script->on_launch = [&](int p) { if (p == 0) observed->uncertain_close[0] = true; };
+    auto events = completion(0, 0); auto reference = completion(1, 0);
+    events.insert(events.end(), reference.begin(), reference.end());
+    events.push_back({0, EventKind::error, {}, EINTR, RunnerErrorCode::cleanup, "uncertain close"});
+    script->steps = {{0, events}, {1000, {}}};
+    Runner runner(std::move(script));
+    auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {});
+    const auto pending = runner.pending_ownership();
+    observed->steps = {{0, {}}};
+    observed->after_service = [&] { observed->uncertain_close[0] = false; };
+    auto recovered = runner.cleanup(std::chrono::milliseconds(0));
+    REQUIRE(pending.size() == 1);
+    REQUIRE_FALSE(pending[0].awaiting_reap);
+    REQUIRE(pending[0].open_descriptors == 0);
+    REQUIRE(pending[0].uncertain_descriptors == 1);
+    REQUIRE(recovered.resolved);
+    REQUIRE(recovered.errors.empty());
+    REQUIRE(recovered.execution.programs[0].reaped);
+    REQUIRE(original.errors[0].system_error == EINTR);
+    REQUIRE(observed->launches == std::array{1, 1});
+}
+TEST_CASE("cancelled recovery intercepts waits and only stops still-owned programs", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource initial, retry;
+    script->on_launch = [&](int p) { if (p == 1) initial.request_stop(); };
+    script->steps = {{0, completion(0, 0)}, {1000, {}}};
+    Runner runner(std::move(script));
+    runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, initial.token());
+    retry.request_stop();
+    observed->steps = {{0, {}}};
+    auto cancelled = runner.cleanup(std::chrono::milliseconds(1000), retry.token());
+    const auto stopped_after_cancel = observed->stops;
+    const auto pending = runner.pending_ownership();
+    observed->steps = {{0, completion(1, 0)}};
+    auto recovered = runner.cleanup();
+    REQUIRE_FALSE(cancelled.resolved);
+    REQUIRE(cancelled.cancelled);
+    REQUIRE(cancelled.errors.empty());
+    REQUIRE(observed->waits[2] == 0);
+    REQUIRE(stopped_after_cancel == std::array{1, 2});
+    REQUIRE(pending.size() == 1);
+    REQUIRE(pending[0].program == 1);
+    REQUIRE(recovered.resolved);
+    REQUIRE_FALSE(recovered.cancelled);
+    REQUIRE(observed->launches == std::array{1, 1});
+}
+TEST_CASE("destroying a runner with pending ownership invokes the contract check without waiting", "[execution-events]") {
+    const auto child = fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        std::set_terminate([] { _exit(86); });
+        auto script = std::make_unique<Script>();
+        CancellationSource source;
+        script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+        script->steps = {{1000, {}}};
+        {
+            Runner runner(std::move(script));
+            runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
+        }
+        _exit(99);
+    }
+    int status = 0;
+    pid_t reaped = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+        reaped = waitpid(child, &status, WNOHANG);
+        if (reaped != 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+    if (reaped == 0) {
+        kill(child, SIGKILL);
+        const auto cleanup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        do {
+            reaped = waitpid(child, &status, WNOHANG);
+            if (reaped != 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < cleanup_deadline);
+    }
+    REQUIRE(reaped == child);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 86);
+}
+TEST_CASE("invalid cleanup bounds leave pending executions untouched", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource source;
+    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->steps = {{1000, {}}};
+    Runner runner(std::move(script));
+    runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
+    auto negative = runner.cleanup(std::chrono::milliseconds(-1));
+    auto excessive = runner.cleanup(std::chrono::milliseconds(1001));
+    const auto stops = observed->stops;
+    const auto waits = observed->waits.size();
+    auto events = completion(0, 0); auto reference = completion(1, 0);
+    events.insert(events.end(), reference.begin(), reference.end());
+    observed->steps = {{0, events}};
+    auto resolved = runner.cleanup(std::chrono::milliseconds(0));
+    REQUIRE(negative.errors[0].code == RunnerErrorCode::configuration);
+    REQUIRE(excessive.errors[0].code == RunnerErrorCode::configuration);
+    REQUIRE_FALSE(negative.resolved);
+    REQUIRE_FALSE(excessive.resolved);
+    REQUIRE(stops == std::array{1, 1});
+    REQUIRE(waits == 1);
+    REQUIRE(resolved.resolved);
+    REQUIRE(observed->waits.back() == 0);
+}
+TEST_CASE("failed recovery termination can be retried without erasing either error result", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource source;
+    script->on_launch = [&](int p) { if (p == 1) source.request_stop(); };
+    script->fail_stop = 0;
+    script->steps = {{1000, {}}};
+    Runner runner(std::move(script));
+    auto original = runner.run("0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
+    observed->steps = {{0, completion(1, 0)}, {1000, {}}};
+    auto failed = runner.cleanup();
+    const auto pending = runner.pending_ownership();
+    observed->fail_stop.reset();
+    observed->steps = {{0, completion(0, 0)}};
+    auto recovered = runner.cleanup();
+    REQUIRE_FALSE(failed.resolved);
+    REQUIRE(failed.errors[0].system_error == EPERM);
+    REQUIRE(failed.errors[1].code == RunnerErrorCode::cleanup);
+    REQUIRE(pending.size() == 1);
+    REQUIRE(pending[0].program == 0);
+    REQUIRE(recovered.resolved);
+    REQUIRE(recovered.errors.empty());
+    REQUIRE(recovered.execution.errors[0].system_error == EPERM);
+    REQUIRE(original.errors[0].system_error == EPERM);
+    REQUIRE_FALSE(original.programs[0].cleanup_complete);
+    REQUIRE_FALSE(failed.execution.programs[0].cleanup_complete);
+    REQUIRE(observed->launches == std::array{1, 1});
 }
