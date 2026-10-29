@@ -89,6 +89,7 @@ jobs:
             ${{ runner.temp }}/source/build/debug/Testing/Temporary/LastTest.log
             ${{ runner.temp }}/source/build/debug/**/evidence.txt
             ${{ runner.temp }}/source/build/debug/**/recovery-evidence.txt
+            ${{ runner.temp }}/source/build/debug/**/*.evidence.txt
             ${{ runner.temp }}/homebrew-check/verified-formula.rb
             ${{ runner.temp }}/homebrew-check/**/evidence.txt
             ${{ runner.temp }}/homebrew-check/**/recovery-evidence.txt

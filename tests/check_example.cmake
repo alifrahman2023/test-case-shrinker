@@ -121,11 +121,12 @@ foreach(destination "${example}/reduced.txt" "${CHECK_DIRECTORY}/result with spa
         "${example}/run.sh" ${arguments}
         WORKING_DIRECTORY "${CHECK_DIRECTORY}/elsewhere"
         RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE evidence TIMEOUT 20)
+    file(WRITE "${destination}.evidence.txt"
+        "Exit status: ${status}\n\nstdout:\n${output}\nstderr:\n${evidence}")
     if(NOT "${status}" STREQUAL "0" OR NOT output STREQUAL ""
        OR NOT evidence MATCHES "Stopped: completed." OR NOT evidence MATCHES "Final save: succeeded")
         message(FATAL_ERROR "Example script failed (${status}): ${output}${evidence}")
     endif()
-    file(WRITE "${destination}.evidence.txt" "${evidence}")
     check_answers("${destination}" "")
     file(READ "${destination}" reduced)
     file(READ "${example}/original.txt" original)
