@@ -106,6 +106,24 @@ TEST_CASE("deadline covers collection and distinguishes pending setup from execu
         }
     }
 }
+TEST_CASE("default execution limits permit both programs beyond the former deadlines", "[execution-events]") {
+    for (bool setup_done : {false, true}) {
+        auto script = std::make_unique<Script>();
+        if (setup_done) script->steps.push_back({0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}});
+        std::vector<ExecutionEvent> events{{solution, EventKind::stdout_data, "1"}, {reference, EventKind::stdout_data, "2"}};
+        for (auto role : program_roles) {
+            const auto finished = completion(role, 0);
+            events.insert(events.end(), finished.begin(), finished.end());
+        }
+        script->steps.push_back({60'000, std::move(events)});
+        Runner runner(std::move(script));
+        auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
+        REQUIRE(result.execution.errors.empty());
+        REQUIRE(result.outcome == CandidateOutcome::preserved);
+        REQUIRE(result.execution.programs.solution.stop_reasons.empty());
+        REQUIRE(result.execution.programs.reference.stop_reasons.empty());
+    }
+}
 TEST_CASE("invalid runner configuration is rejected before launching either program", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     Runner runner(std::move(script));
@@ -227,25 +245,42 @@ TEST_CASE("sleep-inclusive clock jumps expire work before newly collected comple
     script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}},
                      {60'000, {}}, {0, completion(solution, 0)}, {0, completion(reference, 0)}};
     Runner runner(std::move(script));
-    auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
+    RunLimits limits;
+    limits.solution_timeout = limits.reference_timeout = std::chrono::seconds(10);
+    auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == CandidateOutcome::lost);
     REQUIRE(observed->stops == std::array{1, 1});
     REQUIRE(result.execution.programs.solution.stop_reasons[0] == StopReason::timeout);
     REQUIRE(result.execution.programs.reference.stop_reasons[0] == StopReason::timeout);
 }
-TEST_CASE("completed reference cleanup does not shorten the solution execution deadline", "[execution-events]") {
+TEST_CASE("finite reference timeout permits an unlimited solution after reference cleanup", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
     script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}},
-                     {1, {}}, {5, completion(reference, 0)}, {2000, {}}, {0, completion(solution, 0)}};
+                     {1, {}}, {5, completion(reference, 0)}, {60'000, {}}, {0, completion(solution, 0)}};
     Runner runner(std::move(script));
     RunLimits limits; limits.reference_timeout = std::chrono::milliseconds(1);
-    limits.solution_timeout = std::chrono::seconds(10);
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
     if (runner.has_pending_ownership()) observed->service({}, 0);
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == CandidateOutcome::inconclusive);
     REQUIRE(observed->stops == std::array{0, 1});
+}
+TEST_CASE("unlimited executions remain cancellable after long elapsed time", "[execution-events]") {
+    auto script = std::make_unique<Script>(); auto* observed = script.get();
+    CancellationSource source;
+    script->steps = {{0, {{solution, EventKind::setup_complete}, {reference, EventKind::setup_complete}}},
+                     {60'000, {}}, {0, completion(solution, 0)}, {0, completion(reference, 0)}};
+    script->after_service = [&] { if (observed->clock >= 60'100) source.request_stop(); };
+    Runner runner(std::move(script));
+    auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {}, source.token());
+    REQUIRE(result.execution.errors.empty());
+    REQUIRE(result.execution.cancelled);
+    REQUIRE_FALSE(result.outcome);
+    REQUIRE(observed->stops == std::array{1, 1});
+    REQUIRE(result.execution.programs.solution.stop_reasons == std::vector{StopReason::cancellation});
+    REQUIRE(result.execution.programs.reference.stop_reasons == std::vector{StopReason::cancellation});
+    REQUIRE_FALSE(runner.has_pending_ownership());
 }
 TEST_CASE("buffered output after exit must complete before wrong-answer acceptance", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();

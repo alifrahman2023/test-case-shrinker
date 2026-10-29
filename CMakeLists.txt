@@ -65,11 +65,22 @@ if(BUILD_TESTING)
             "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-check"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_information.cmake")
 
-    foreach(demo IN ITEMS duplicates width)
+    add_test(NAME source_installation
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/source-installation"
+            "-DDEMO_BUILD_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/packaging/check-source.cmake")
+    set_tests_properties(source_installation PROPERTIES TIMEOUT 180)
+
+    set(example_names duplicates width maximum sum-last lower-median)
+    foreach(demo IN LISTS example_names)
         foreach(role IN ITEMS solution reference)
             add_executable(demo_${demo}_${role} examples/${demo}/${role}.cpp)
             target_compile_options(demo_${demo}_${role} PRIVATE -Wall -Wextra -Wpedantic)
         endforeach()
+    endforeach()
+    foreach(demo IN ITEMS duplicates width)
         add_test(NAME demo_${demo}
             COMMAND "${CMAKE_COMMAND}"
                 "-DDEMO=${demo}"
@@ -80,5 +91,18 @@ if(BUILD_TESTING)
                 "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/demo-${demo}-check"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_demonstration.cmake")
         set_tests_properties(demo_${demo} PROPERTIES TIMEOUT 30)
+    endforeach()
+
+    foreach(example IN LISTS example_names)
+        add_test(NAME example_${example}
+            COMMAND "${CMAKE_COMMAND}"
+                "-DCASE=${example}"
+                "-DEXAMPLE_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/examples/${example}"
+                "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/example-${example}-check"
+                "-DSHRINK_EXECUTABLE=$<TARGET_FILE:shrink>"
+                "-DNATIVE_SOLUTION=$<TARGET_FILE:demo_${example}_solution>"
+                "-DNATIVE_REFERENCE=$<TARGET_FILE:demo_${example}_reference>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_example.cmake")
+        set_tests_properties(example_${example} PROPERTIES TIMEOUT 30)
     endforeach()
 endif()

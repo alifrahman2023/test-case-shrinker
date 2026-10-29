@@ -4,50 +4,92 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing author-approved release tag (never created by this workflow)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   native-mac:
-    name: macOS 15 ARM64 Debug and installed Release
-    runs-on: macos-15
+    name: macOS ${{ matrix.macos }} ARM64 Debug and installed Release
+    strategy:
+      fail-fast: false
+      matrix:
+        macos: ['15', '26']
+    runs-on: macos-${{ matrix.macos }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Record exact source and prepare archive
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source-identity.txt"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+            grep -F "tag: \"$RELEASE_TAG\"" Formula/shrink.rb
+            echo "$RELEASE_TAG" >> "$RUNNER_TEMP/source-identity.txt"
+            curl --fail --location --retry 3 \
+              "https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$RELEASE_TAG.tar.gz" \
+              --output "$RUNNER_TEMP/shrink-source.tar.gz"
+          else
+            git archive --format=tar.gz --prefix=shrink-source/ HEAD > "$RUNNER_TEMP/shrink-source.tar.gz"
+          fi
+          shasum -a 256 "$RUNNER_TEMP/shrink-source.tar.gz" | tee -a "$RUNNER_TEMP/source-identity.txt"
+          mkdir "$RUNNER_TEMP/source"
+          tar -xzf "$RUNNER_TEMP/shrink-source.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/source"
+          # The tag archive must contain exactly the approved commit's tracked files.
+          mkdir "$RUNNER_TEMP/expected-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/expected-source"
+          diff -r "$RUNNER_TEMP/expected-source" "$RUNNER_TEMP/source"
       - name: Record baseline and tool versions
+        env:
+          EXPECTED_MACOS: ${{ matrix.macos }}
         run: |
           test "$(uname -m)" = arm64
-          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          test "$(sw_vers -productVersion | cut -d. -f1)" = "$EXPECTED_MACOS"
           sw_vers
           xcrun clang++ --version
           cmake --version
+          brew --version
       - name: Configure Debug tests
+        working-directory: ${{ runner.temp }}/source
         run: cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
       - name: Build Debug
+        working-directory: ${{ runner.temp }}/source
         run: cmake --build build/debug --parallel 3
-      - name: Run full Debug suite
+      - name: Run full Debug suite and manual Release installation
+        working-directory: ${{ runner.temp }}/source
         run: ctest --test-dir build/debug --output-on-failure --no-tests=error
-      - name: Configure CLI-only Release
-        run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-      - name: Build and install Release
+      - name: Verify Homebrew source installation and both demonstrations
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          cmake --build build/release --parallel 3
-          cmake --install build/release --prefix "$RUNNER_TEMP/shrink-install"
-      - name: Check installed command outside build directory
-        run: >-
-          cmake
-          -DSHRINK_EXECUTABLE="$RUNNER_TEMP/shrink-install/bin/shrink"
-          -DCHECK_DIRECTORY="$RUNNER_TEMP/shrink-installed-check"
-          -P tests/check_information.cmake
-      - name: Run demonstrations with installed Release
-        run: |
-          for demo in duplicates width; do
-            cmake \
-              -DDEMO="$demo" \
-              -DSHRINK_EXECUTABLE="$RUNNER_TEMP/shrink-install/bin/shrink" \
-              -DDEMO_DIRECTORY="$GITHUB_WORKSPACE/examples/$demo" \
-              -DSOLUTION="$GITHUB_WORKSPACE/build/debug/demo_${demo}_solution" \
-              -DREFERENCE="$GITHUB_WORKSPACE/build/debug/demo_${demo}_reference" \
-              -DCHECK_DIRECTORY="$RUNNER_TEMP/shrink-demo-$demo" \
-              -P tests/check_demonstration.cmake
-          done
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            bash "$RUNNER_TEMP/source/packaging/check-homebrew.sh" "$RUNNER_TEMP/source" "$RUNNER_TEMP/homebrew-check"
+          else
+            bash "$RUNNER_TEMP/source/packaging/check-homebrew.sh" "$RUNNER_TEMP/source" "$RUNNER_TEMP/homebrew-check" "$RUNNER_TEMP/shrink-source.tar.gz"
+          fi
+      - name: Retain verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-installation-macos-${{ matrix.macos }}
+          path: |
+            ${{ runner.temp }}/source-identity.txt
+            ${{ runner.temp }}/source/build/debug/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/source/build/debug/**/evidence.txt
+            ${{ runner.temp }}/source/build/debug/**/recovery-evidence.txt
+            ${{ runner.temp }}/source/build/debug/**/*.evidence.txt
+            ${{ runner.temp }}/homebrew-check/verified-formula.rb
+            ${{ runner.temp }}/homebrew-check/**/evidence.txt
+            ${{ runner.temp }}/homebrew-check/**/recovery-evidence.txt
