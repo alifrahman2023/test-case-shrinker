@@ -640,3 +640,60 @@ TEST_CASE("CLI caps stderr preview after escaping control bytes", "[cli-baseline
     REQUIRE(text.find("[presentation truncated]") != std::string::npos);
     REQUIRE(text.find("retention truncated at 64 KiB") != std::string::npos);
 }
+TEST_CASE("CLI budgeted removal saves smaller evidence and resume verifies with distinct destination", "[cli-removal]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"});
+    arguments[16] = "--max-evaluations=1";
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(output.str().empty());
+    REQUIRE(workspace.read("result.txt") == "2\n-2 7\n");
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n");
+    REQUIRE(errors.str().find("Removal round unfinished") != std::string::npos);
+    REQUIRE(errors.str().find("candidate evaluations: 1; acceptances: 1") != std::string::npos);
+    REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+    arguments[1] = "result.txt"; arguments[15] = "resumed.txt";
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(workspace.read("result.txt") == "2\n-2 7\n");
+    REQUIRE(workspace.read("resumed.txt") == "1\n7\n");
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n2\n-2 7\n1\n7\n");
+}
+TEST_CASE("CLI throttles progress and quiet retains evidence summary and saved result", "[cli-removal]") {
+    Workspace workspace;
+    for (bool quiet : {false, true}) {
+        auto arguments = fixture_arguments(workspace, {"slow-text", "600", "1"}, {"text", "2"});
+        arguments[16] = "--max-evaluations=2";
+        if (quiet) arguments.push_back("--quiet");
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+        REQUIRE(output.str().empty());
+        REQUIRE(workspace.read("result.txt") == "1\n7\n");
+        auto progress = errors.str().find("Progress:");
+        REQUIRE((progress == std::string::npos) == quiet);
+        if (!quiet) {
+            REQUIRE(errors.str().find("Progress:", progress + 1) == std::string::npos);
+            REQUIRE(errors.str().find("evaluations 1; acceptances 1; best length 2; elapsed") != std::string::npos);
+        }
+        REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+        REQUIRE(errors.str().find("candidate evaluations: 2; acceptances: 2") != std::string::npos);
+    }
+}
+TEST_CASE("CLI failed final replacement recovers full reduced best and retains saved baseline", "[cli-removal]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"});
+    arguments[16] = "--max-evaluations=1";
+    shrink::cli::InvocationServices services;
+    services.save = [](const fs::path& path, const shrink::SaveRequest& save) {
+        shrink::cli::SaveFileOperations operations;
+        if (save.kind == shrink::SaveKind::final)
+            operations.rename = [](const char*, const char*) { errno = EACCES; return -1; };
+        return shrink::cli::save_atomic(path, save, operations);
+    };
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 1);
+    REQUIRE(output.str() == "2\n-2 7\n");
+    REQUIRE(workspace.read("result.txt") == "3\n7 -2 7\n");
+    REQUIRE(errors.str().find("Saved revision 1:") != std::string::npos);
+    REQUIRE(errors.str().find("Final save: failed") != std::string::npos);
+    REQUIRE(errors.str().find("Observed: evaluation limit") != std::string::npos);
+}

@@ -18,6 +18,10 @@ int main(int argc, char** argv) {
     if (argc < 2) return 99;
     const std::string mode = argv[1];
     if (mode == "text" && argc == 3) std::cout << argv[2];
+    else if (mode == "slow-text" && argc == 4) {
+        usleep(static_cast<useconds_t>(std::stoul(argv[2]) * 1000));
+        std::cout << argv[3];
+    }
     else if (mode == "record-input" && argc == 4) {
         std::ofstream record(argv[2], std::ios::binary | std::ios::app);
         record << std::cin.rdbuf();

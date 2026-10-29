@@ -35,7 +35,7 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
                   "Value options accept --option value or --option=value. Program arguments\n"
                   "beginning with '-' require the equals form. No shell interpretation.\n"
                   "Programs must be deterministic and create no descendant processes.\n"
-                  "Use --max-evaluations 0 to verify and save a baseline; search is not yet available.\n";
+                  "Use an evaluation budget to stop removal early; remaining passes are not yet available.\n";
         return output ? 0 : 1;
     }
     if (arguments.size() == 1 && arguments.front() == "--version") {
@@ -55,6 +55,13 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
     RunHooks hooks;
     hooks.save = [&](const SaveRequest& save) {
         return services.save ? services.save(invocation.output_path, save) : save_atomic(invocation.output_path, save);
+    };
+    hooks.notify = [&](const RunEvent& event) {
+        if (event.kind != RunEventKind::progress || invocation.quiet) return;
+        errors << "Progress: evaluations " << event.statistics.candidate_evaluations
+               << "; acceptances " << event.statistics.acceptances
+               << "; best length " << event.best.values.size()
+               << "; elapsed " << event.statistics.elapsed_ms << " ms\n";
     };
     auto result = reduce(std::move(invocation.core.request), runner, services.cancellation, hooks);
     // The terminal adapter returns to main and exits after reporting unresolved

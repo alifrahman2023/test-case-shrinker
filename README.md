@@ -1,12 +1,17 @@
 # shrink
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
-The current implementation validates requests, verifies a normalized wrong-answer
-baseline, saves it safely, and reports execution and disagreement evidence.
-Use `--max-evaluations 0` for this baseline-only slice. Candidate search remains a
-subsequent ticket under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10);
-a verified invocation with a nonzero or omitted candidate budget saves its
-baseline and reports an operational error explaining that search is unavailable.
+The current implementation verifies a normalized wrong-answer baseline and runs
+budgeted contiguous-chunk removal with recoverable checkpoints and progress.
+Use `--max-evaluations 0` to verify and save only the baseline, or a positive
+budget to stop removal early (exit 4). Removal starts with floor(length / 2),
+clamped to one, sweeps left to right, stays at the same position after acceptance,
+and halves the chunk size after each sweep down to singles. A shorter tail chunk
+is tested at the end of a sweep. Invalid removals consume no evaluations.
+The remaining value-simplification passes and full irreducibility path are a
+subsequent ticket under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10).
+Exhausting removal alone saves the best input and reports an operational error
+that the remaining passes are unavailable; it does not claim completion.
 
 The supported baseline is macOS 15 on Apple Silicon (ARM64), using Apple Clang
 and C++20. Newer macOS versions are not rejected. Development requires Apple's
@@ -161,7 +166,12 @@ shrink --input failing.txt --solution ./solution --reference ./reference \
 ```
 
 The CLI always supplies saving. After verification it saves the normalized
-baseline, then attempts exactly one final save on stopping, even when unchanged
+baseline, marks accepted revisions pending, and checkpoints the latest best between
+evaluations once at least one second has elapsed since the previous successful
+save. Multiple acceptances coalesce; unchanged input is not periodically rewritten.
+This throttles I/O and does not promise a maximum recovery gap. Initial or periodic
+save failures stop search and retain their error even after a successful final
+retry. The CLI attempts exactly one final save on stopping, even when unchanged
 or the initial save failed. Each save writes a temporary file beside the output
 and renames it over the destination, without fsync. Write/replacement failure
 leaves the previous destination intact; this does not promise power-loss or OS
@@ -174,9 +184,12 @@ Baseline and final evidence show both successful executions, the first differing
 token, and escaped bounded token previews (including end of output). Evidence is
 retained from verification; no extra final evaluation is performed. Failed
 baselines show relevant exit/signal/stop facts and escaped stderr previews up to
-4 KiB, separately marking the runner's 64 KiB retention truncation. Quiet mode
-retains evidence, summary, and errors. A baseline-only result claims no
-irreducibility and reports that no reduction round began.
+4 KiB, separately marking the runner's 64 KiB retention truncation. Progress appears on stderr at most once per second and includes candidate
+evaluations, acceptances, best length, and elapsed time; individual acceptances
+are not printed. Quiet mode suppresses only periodic progress and retains
+evidence, summary, and errors. A baseline-only result reports no round; removal
+reports a partial round and distinct inconclusive candidate texts. Neither
+claims irreducibility.
 
 Resume by supplying the saved input, all required program/constraint options,
 and a different output destination, for example `--input reduced.txt --output
@@ -188,10 +201,15 @@ The internal synchronous `reduce` boundary takes an owning `ReductionRequest`, a
 caller-owned `Runner`, a cancellation token, and optional `RunHooks`. Results own
 baseline/best evidence, typed errors, counts, observed stop reasons, and saving
 state; no CLI exit integers cross that boundary. Omitting the save hook returns
-an explicitly unsaved in-memory result. Initial/final save requests include the
+an explicitly unsaved in-memory result. Initial/periodic/final save requests include the
 normalized bytes, revision, and save kind. Callback objects live through the
 call, run on the calling thread, return promptly, and must not reenter the
 runner. Borrowed arguments live only through that callback; copy retained data.
+Baseline, acceptance, and throttled progress notifications run on the calling
+thread; acceptance events expose the current accepted input. Results retain
+baseline/current-best evidence and operational-failure evidence, with no ordinary
+candidate execution history. Statistics count actual lost/inconclusive executions
+and distinct inconclusive texts for the unfinished round.
 Exceptions become typed operational errors; a throwing notifier is disabled,
 and save exceptions obey the same single-final-attempt rule. Blocked callbacks
 and filesystem operations can delay stopping. The overall sleep-inclusive budget
@@ -209,5 +227,5 @@ input and still attempts one final save, including when Ctrl-C arrives during
 saving. Status 130 denotes cancellation; observed cleanup/save/notifier errors
 require status 1 while preserving the cancellation reason and verified recovery
 state. Pending ownership remains explicit, and process exit cannot guarantee
-continued cleanup. Candidate-processing cancellation uses this same contract in
-the later search slice.
+continued cleanup. Removal checks cancellation during generation/validation too, including
+invalid candidates that never launch programs. Unfinished work is discarded.

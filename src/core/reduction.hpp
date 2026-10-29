@@ -60,7 +60,7 @@ struct SaveSummary {
     FinalSaveOutcome final_outcome = FinalSaveOutcome::not_attempted;
     std::vector<SaveFailure> failures;
 };
-enum class RunEventKind { baseline_verified };
+enum class RunEventKind { baseline_verified, acceptance, progress };
 struct RunEvent { RunEventKind kind; const VerifiedInput& best; const RunStatistics& statistics; };
 // Callbacks execute synchronously on the calling thread. Keep them alive for
 // the call, return promptly, and do not reenter the runner. Arguments borrow
@@ -80,6 +80,7 @@ struct ReductionResult {
     RunOutcome outcome = RunOutcome::operational_stop;
     std::optional<VerifiedInput> best;
     BaselineRecord baseline;
+    std::shared_ptr<const Evaluation> operational_evaluation;
     RunStatistics statistics;
     std::vector<RunError> errors;
     SaveSummary saving;
