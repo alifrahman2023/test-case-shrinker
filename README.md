@@ -124,13 +124,16 @@ and sorted-array medians.
 | `--unique` | Require distinct values. |
 | `--solution-arg=VALUE` | Append a solution argument; repeatable. |
 | `--reference-arg=VALUE` | Append a reference argument; repeatable. |
-| `--solution-timeout TIME` | Per-solution elapsed limit; default `2s`. |
-| `--reference-timeout TIME` | Per-reference elapsed limit; default `10s`. |
+| `--solution-timeout TIME` | Optional per-solution elapsed limit; unlimited by default. |
+| `--reference-timeout TIME` | Optional per-reference elapsed limit; unlimited by default. |
 | `--time-limit TIME` | Overall elapsed budget; no default limit. |
 | `--max-evaluations N` | Candidate evaluation budget; no default limit. |
 | `--quiet` | Suppress periodic progress; retain evidence, summary, and errors. |
 
 Durations are positive whole milliseconds or seconds, such as `250ms` or `10s`.
+By default, neither program execution nor the overall search has a time limit.
+If a program stalls, press Ctrl-C to cancel. Set either per-program timeout or
+`--time-limit` when you want an automatic deadline.
 Value options accept `--option value` and `--option=value`. Program arguments
 starting with `-` require the equals form. Shrink uses explicit executable paths
 and passes arguments without shell interpretation or PATH lookup.
@@ -156,6 +159,7 @@ Operational errors take precedence over cancellation and budgets.
 shrink --input failing.txt --solution ./solution --reference ./reference \
   --min-length 0 --max-length 100000 --min-value=-1000000000 \
   --max-value 1000000000 --max-evaluations 500 --time-limit 30s \
+  --solution-timeout 2s --reference-timeout 10s \
   --output reduced.txt --quiet
 ```
 

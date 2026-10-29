@@ -382,7 +382,7 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
     retained_collection_ = {};
     struct ProgramState {
         std::uint64_t start = 0;
-        std::chrono::milliseconds timeout;
+        std::optional<std::chrono::milliseconds> timeout;
         OutputCollection collection{};
         bool stopped = false;
         bool finished = false;
@@ -407,8 +407,8 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         for (const auto program : program_roles) {
             auto& evidence = result.programs.for_role(program);
             const auto& state = states[program_index(program)];
-            if (!evidence.launched || state.finished || state.stopped) continue;
-            if (now - state.start >= static_cast<std::uint64_t>(state.timeout.count())) {
+            if (!evidence.launched || state.finished || state.stopped || !state.timeout) continue;
+            if (now - state.start >= static_cast<std::uint64_t>(state.timeout->count())) {
                 if (!evidence.setup_complete)
                     result.errors.push_back({RunnerErrorCode::launch, program, 0, "deadline expired during setup"});
                 stop(program, StopReason::timeout);
@@ -459,9 +459,9 @@ ExecutionPair Runner::run(std::string_view input, const ProgramSpec& solution,
         }
         for (const auto program : program_roles) {
             const auto& state = states[program_index(program)];
-            if (result.programs.for_role(program).launched && !state.finished && !state.stopped) {
+            if (result.programs.for_role(program).launched && !state.finished && !state.stopped && state.timeout) {
                 const auto elapsed = now - state.start;
-                const auto limit = static_cast<std::uint64_t>(state.timeout.count());
+                const auto limit = static_cast<std::uint64_t>(state.timeout->count());
                 wait_ms = std::min(wait_ms, elapsed >= limit ? 0 : limit - elapsed);
             }
         }

@@ -16,8 +16,9 @@ struct ProgramSpec {
 };
 
 struct RunLimits {
-    std::chrono::milliseconds solution_timeout{2000};
-    std::chrono::milliseconds reference_timeout{10000};
+    // Absent deadlines allow execution until completion, cancellation, or error.
+    std::optional<std::chrono::milliseconds> solution_timeout;
+    std::optional<std::chrono::milliseconds> reference_timeout;
     // Optional positive overall elapsed budget. Starts after preparation and
     // uses the runner's sleep-inclusive monotonic clock. Includes baseline,
     // search and checkpoints; cleanup/final saving may extend beyond expiry.

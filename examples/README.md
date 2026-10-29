@@ -29,8 +29,9 @@ and saves `reduced.txt` beside its input by default. Pass a different output pat
 as its first argument. Existing output is replaced after successful verification.
 Scripts use `SHRINK_BIN` when set, otherwise an installed `shrink`, then a local
 `build/release/shrink` or `build/debug/shrink` executable.
-The tutorial commands allow ten seconds per program, including executable startup
-on macOS. They leave overall time and evaluation budgets unrestricted.
+The tutorial commands use shrink's unlimited default execution and search budgets.
+If a program stalls, press Ctrl-C. Add explicit timeout or budget flags when
+running shrink directly to enable automatic stopping.
 
 ```sh
 SHRINK_BIN="$PWD/build/debug/shrink" ./examples/maximum/run.sh /tmp/maximum.txt
@@ -206,7 +207,7 @@ sufficient to express the problem requirements. Built-in bounds, sortedness and
 uniqueness cannot express every problem constraint. Both examples are deterministic,
 use only stdin and stdout, create no descendants, and need no external state.
 Keep the programs and relevant environment stable during a run, with execution
-times comfortably below the per-program timeouts. Repeatability excludes time
+times comfortably below any configured per-program timeouts. Repeatability excludes time
 limits, interruption, near-timeout executions, and changes of shrink version.
 
 The first release supports wrong-answer reduction on one integer array, with both

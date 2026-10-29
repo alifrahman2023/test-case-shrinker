@@ -15,15 +15,16 @@ std::optional<ValidationError> validate_execution_configuration(
             }
         }
     }
-    if (limits.solution_timeout.count() <= 0 || limits.reference_timeout.count() <= 0) {
-        return ValidationError{ValidationCode::configuration, "program timeouts must be positive"};
+    if ((limits.solution_timeout && limits.solution_timeout->count() <= 0)
+        || (limits.reference_timeout && limits.reference_timeout->count() <= 0)) {
+        return ValidationError{ValidationCode::configuration, "program timeouts must be positive when specified"};
     }
     return {};
 }
 std::variant<PreparedRequest, ValidationError> prepare_request(ReductionRequest request) {
     if (auto error = validate_execution_configuration(request.solution, request.reference, request.limits)) return *error;
     if (request.limits.time_limit && request.limits.time_limit->count() <= 0) {
-        return ValidationError{ValidationCode::configuration, "program timeouts and the overall time limit must be positive"};
+        return ValidationError{ValidationCode::configuration, "the overall time limit must be positive when specified"};
     }
     auto parsed = parse_input(request.input_text, request.constraints);
     if (auto* error = std::get_if<ValidationError>(&parsed)) return *error;

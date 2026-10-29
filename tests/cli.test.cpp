@@ -121,7 +121,7 @@ TEST_CASE("CLI preparation owns normalized input and preserves program argument 
     REQUIRE_FALSE(fs::exists("executed"));
 }
 
-TEST_CASE("CLI preparation defaults output and per-program deadlines without writing", "[cli]") {
+TEST_CASE("CLI preparation defaults output and leaves execution and search budgets unlimited", "[cli]") {
     Workspace workspace;
     auto arguments = workspace.arguments();
     arguments.resize(arguments.size() - 2);
@@ -129,8 +129,8 @@ TEST_CASE("CLI preparation defaults output and per-program deadlines without wri
     REQUIRE(std::holds_alternative<shrink::cli::Invocation>(result));
     const auto& invocation = std::get<shrink::cli::Invocation>(result);
     REQUIRE(invocation.output_path == "reduced.txt");
-    REQUIRE(invocation.core.request.limits.solution_timeout == std::chrono::seconds(2));
-    REQUIRE(invocation.core.request.limits.reference_timeout == std::chrono::seconds(10));
+    REQUIRE_FALSE(invocation.core.request.limits.solution_timeout);
+    REQUIRE_FALSE(invocation.core.request.limits.reference_timeout);
     REQUIRE_FALSE(invocation.core.request.limits.time_limit);
     REQUIRE_FALSE(invocation.core.request.limits.max_evaluations);
     REQUIRE_FALSE(invocation.quiet);
@@ -820,14 +820,18 @@ public:
 };
 }
 TEST_CASE("CLI overall expiry terminates both real programs and retains only verified recovery", "[cli-time-limit]") {
-    struct Case { bool verified; bool fail_final; };
-    for (const auto& test : {Case{false, false}, Case{true, false}, Case{true, true}}) {
+    struct Case { bool verified; bool fail_final; bool finite_timeouts; };
+    for (const auto& test : {Case{false, false, false}, Case{true, false, false}, Case{true, true, false},
+                             Case{false, false, true}, Case{true, false, true}, Case{true, true, true}}) {
+        CAPTURE(test.verified, test.fail_final, test.finite_timeouts);
         const auto verified = test.verified;
         Workspace workspace;
         const std::string threshold = verified ? "3" : "4";
         auto arguments = fixture_arguments(workspace, {"wait-below-length", "solution-ready", "1", threshold},
                                                       {"wait-below-length", "reference-ready", "2", threshold}, std::nullopt);
-        arguments.insert(arguments.end(), {"--time-limit=1s", "--solution-timeout=10s", "--reference-timeout=10s"});
+        arguments.emplace_back("--time-limit=1s");
+        if (test.finite_timeouts)
+            arguments.insert(arguments.end(), {"--solution-timeout=10s", "--reference-timeout=10s"});
         auto backend = std::make_unique<ReadyDeadlineClock>(); auto* observed = backend.get();
         shrink::Runner runner(std::move(backend));
         shrink::cli::InvocationServices services; services.runner = &runner;

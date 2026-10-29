@@ -157,11 +157,27 @@ including through hard links or symlinks in protected paths or parent directorie
 ## Program execution
 
 Internal candidate evaluation accepts already normalized bytes, two explicit
-`ProgramSpec` paths with ordered arguments, positive per-program timeouts, and a
+`ProgramSpec` paths with ordered arguments, optional positive per-program timeouts, and a
 caller-owned `CancellationToken`. Programs inherit the working directory,
 environment, and intended signal state. They must create no descendants. The
 runner installs no application-wide signal handlers and intercepts cancellation
 and deadline waits at intervals no longer than 5 ms when scheduled.
+
+Solution and reference timeouts are absent by default in both the CLI and typed
+`RunLimits`. The overall elapsed-time and candidate-evaluation budgets are also
+absent by default. An execution may wait indefinitely for a program to finish;
+Ctrl-C/caller cancellation, a configured overall deadline, or an operational
+failure can stop it. `--max-evaluations` limits candidate evaluations, not the
+duration of an active execution.
+This follows the approved [process-execution amendment](https://github.com/alifrahman2023/test-case-shrinker/issues/6#issuecomment-6509467180).
+
+Set `--solution-timeout` or `--reference-timeout` to opt into a positive finite
+deadline for that program. Each enabled deadline starts immediately before launch
+and covers setup, input delivery, execution, and output collection using the
+sleep-inclusive clock. A deadline during pending setup remains an operational
+error; after setup it is an unsuccessful timeout. One program's timeout can be
+configured independently of the other's. Cleanup retains its shared one-second
+bound after a stop request even when execution deadlines are absent.
 
 Each program retains at most 8,388,608 unchanged stdout bytes (one extra byte
 fails execution) and the first 65,536 stderr bytes (extra bytes are drained and
