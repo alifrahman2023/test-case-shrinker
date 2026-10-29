@@ -10,8 +10,7 @@ Docker, crash reduction, and supplied programs with descendants are deferred.
 ## Homebrew
 
 The personal tap lives in this repository's `Formula/` directory. The formula
-targets `v0.1.0`. **That tag has not been published yet**; these commands become
-usable after the author approves and verifies that release.
+builds the tagged `v0.1.0` source release locally:
 
 ```sh
 brew tap alifrahman2023/shrink https://github.com/alifrahman2023/test-case-shrinker

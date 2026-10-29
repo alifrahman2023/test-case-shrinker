@@ -2,9 +2,8 @@
 
 Release publication and tag creation require the author's approval. Neither the
 CI workflow nor the packaging scripts create tags, publish releases, update a
-tap remotely, close the parent spec, or modify the decision map. Until the first
-approved tag exists, the formula and tagged-install commands are staged release
-infrastructure. Passing PR checks do not mean a tagged release has been verified.
+tap remotely, close the parent spec, or modify the decision map. PR checks verify
+candidate source; release publication requires the separate approved-tag checks.
 
 ## Candidate and exact-release checks
 

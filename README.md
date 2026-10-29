@@ -35,8 +35,7 @@ CMake 3.24 or newer. Only the `shrink` executable is installed.
 
 ### Homebrew
 
-The formula targets `v0.1.0`, which is **pending release**. Once that tag is
-approved and published:
+Install `v0.1.0` from the personal tap:
 
 ```sh
 brew tap alifrahman2023/shrink https://github.com/alifrahman2023/test-case-shrinker
@@ -46,10 +45,10 @@ brew test alifrahman2023/shrink/shrink
 
 ### Manual
 
-To build the current source and install into your home directory:
+To build the tagged source and install into your home directory:
 
 ```sh
-git clone https://github.com/alifrahman2023/test-case-shrinker.git
+git clone --branch v0.1.0 --depth 1 https://github.com/alifrahman2023/test-case-shrinker.git
 cd test-case-shrinker
 cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 cmake --build build/release --parallel 3
