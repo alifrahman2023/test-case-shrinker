@@ -29,6 +29,8 @@ and saves `reduced.txt` beside its input by default. Pass a different output pat
 as its first argument. Existing output is replaced after successful verification.
 Scripts use `SHRINK_BIN` when set, otherwise an installed `shrink`, then a local
 `build/release/shrink` or `build/debug/shrink` executable.
+The tutorial commands allow ten seconds per program, including executable startup
+on macOS. They leave overall time and evaluation budgets unrestricted.
 
 ```sh
 SHRINK_BIN="$PWD/build/debug/shrink" ./examples/maximum/run.sh /tmp/maximum.txt

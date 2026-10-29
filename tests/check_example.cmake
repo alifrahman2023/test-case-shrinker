@@ -110,8 +110,8 @@ check_input("${example}/original.txt")
 if(NOT expected_reference STREQUAL original_reference)
     message(FATAL_ERROR "Original reference answer differs from documentation")
 endif()
-check_answers("${example}/original.txt" "${original_solution}")
 # Exercise default and explicit output paths from a different working directory.
+# Run the script before directly executing binaries, retaining cold-start coverage.
 foreach(destination "${example}/reduced.txt" "${CHECK_DIRECTORY}/result with spaces.txt")
     set(arguments)
     if(NOT destination STREQUAL "${example}/reduced.txt")
@@ -133,3 +133,4 @@ foreach(destination "${example}/reduced.txt" "${CHECK_DIRECTORY}/result with spa
         message(FATAL_ERROR "Example did not simplify its original input")
     endif()
 endforeach()
+check_answers("${example}/original.txt" "${original_solution}")
