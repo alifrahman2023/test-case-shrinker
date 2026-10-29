@@ -64,4 +64,21 @@ if(BUILD_TESTING)
             "-DSHRINK_EXECUTABLE=$<TARGET_FILE:shrink>"
             "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-check"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_information.cmake")
+
+    foreach(demo IN ITEMS duplicates width)
+        foreach(role IN ITEMS solution reference)
+            add_executable(demo_${demo}_${role} examples/${demo}/${role}.cpp)
+            target_compile_options(demo_${demo}_${role} PRIVATE -Wall -Wextra -Wpedantic)
+        endforeach()
+        add_test(NAME demo_${demo}
+            COMMAND "${CMAKE_COMMAND}"
+                "-DDEMO=${demo}"
+                "-DSHRINK_EXECUTABLE=$<TARGET_FILE:shrink>"
+                "-DDEMO_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/examples/${demo}"
+                "-DSOLUTION=$<TARGET_FILE:demo_${demo}_solution>"
+                "-DREFERENCE=$<TARGET_FILE:demo_${demo}_reference>"
+                "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/demo-${demo}-check"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_demonstration.cmake")
+        set_tests_properties(demo_${demo} PROPERTIES TIMEOUT 30)
+    endforeach()
 endif()
