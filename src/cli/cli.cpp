@@ -61,6 +61,14 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
     // ownership. Keep that runner alive until process exit rather than invoking
     // its destructor contract check. Continuing hosts supply their own runner.
     if (owned_runner && runner.has_pending_ownership()) (void)owned_runner.release();
-    return present_result(result, invocation.output_path, output, errors);
+    const int status = present_result(result, invocation.output_path, output, errors);
+    // Recovery/presentation can block after reduce() has returned. Preserve a
+    // cancellation observed there without overriding an operational failure or
+    // a search that already established completion.
+    if (services.cancellation.stop_requested() && !result.observed_reasons.cancellation) {
+        errors << "Observed: caller cancellation during terminal output.\n";
+        if (status == 3 || status == 4) return errors ? 130 : 1;
+    }
+    return status;
 }
 }

@@ -284,3 +284,39 @@ TEST_CASE("CLI cancellation retains unresolved ownership and cleanup errors with
         REQUIRE(errors.str().find("both programs succeeded") == std::string::npos);
     }
 }
+TEST_CASE("terminal Ctrl-C during stdout recovery remains visible alongside save errors", "[cli-cancellation]") {
+    class InterruptingOutput final : public std::stringbuf {
+    public:
+        bool fail = false;
+        bool signalled = false;
+        std::streamsize xsputn(const char* bytes, std::streamsize count) override {
+            if (!signalled) { signalled = true; std::raise(SIGINT); }
+            return fail ? 0 : std::stringbuf::xsputn(bytes, count);
+        }
+    };
+    for (bool fail_stdout : {false, true}) {
+        Workspace workspace;
+        auto arguments = workspace.arguments();
+        std::vector<std::string_view> views(arguments.begin(), arguments.end());
+        cli::InvocationServices services;
+        unsigned saves = 0;
+        services.save = [&](const fs::path& path, const SaveRequest&) -> SaveResult {
+            ++saves;
+            return SaveError{SaveErrorCode::replace, "scripted replacement failure", path,
+                             std::make_error_code(std::errc::permission_denied)};
+        };
+        InterruptingOutput buffer; buffer.fail = fail_stdout;
+        std::ostream output(&buffer);
+        std::ostringstream errors;
+        REQUIRE(cli::run_terminal(views, output, errors, services) == 1);
+        REQUIRE(buffer.signalled);
+        REQUIRE(saves == 2);
+        REQUIRE(buffer.str() == (fail_stdout ? "" : "3\n7 -2 7\n"));
+        REQUIRE(workspace.read("result") == "previous\n");
+        REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n");
+        REQUIRE(workspace.read("reference-input") == "3\n7 -2 7\n");
+        REQUIRE(errors.str().find("Observed: caller cancellation") != std::string::npos);
+        REQUIRE(errors.str().find("scripted replacement failure") != std::string::npos);
+        if (fail_stdout) REQUIRE(errors.str().find("stdout recovery failed") != std::string::npos);
+    }
+}
