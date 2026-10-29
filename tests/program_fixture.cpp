@@ -35,6 +35,18 @@ int main(int argc, char** argv) {
             std::cout << "2";
         } else std::cout << (duplicate ? "duplicate" : "ok");
     }
+    else if (mode == "wait-below-length" && argc == 5) {
+        std::size_t length = 0; if (!(std::cin >> length)) return 95;
+        for (std::size_t index = 0; index < length; ++index) {
+            std::int64_t value; if (!(std::cin >> value)) return 95;
+        }
+        if (length >= std::stoull(argv[4])) std::cout << argv[3];
+        else {
+            signal(SIGINT, SIG_IGN);
+            { std::ofstream ready(argv[2]); ready << getpid() << ' ' << getpgrp(); }
+            for (;;) pause();
+        }
+    }
     else if (mode == "slow-text" && argc == 4) {
         usleep(static_cast<useconds_t>(std::stoul(argv[2]) * 1000));
         std::cout << argv[3];

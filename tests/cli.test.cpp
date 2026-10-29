@@ -1,6 +1,7 @@
 #include "cli.hpp"
 #include "saving.hpp"
 #include "options.hpp"
+#include "runner_backend.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -788,5 +789,76 @@ TEST_CASE("CLI cached inconclusive checks retain exact uncertainty counts with f
         REQUIRE(errors.str().find("Complete final round; distinct inconclusive candidates: 7") != std::string::npos);
         REQUIRE(errors.str().find(cache.enabled ? "candidate evaluations: 7; acceptances: 0" : "candidate evaluations: 8; acceptances: 0") != std::string::npos);
         REQUIRE(errors.str().find(cache.enabled ? "inconclusive executions: 7" : "inconclusive executions: 8") != std::string::npos);
+    }
+}
+namespace {
+// Run real programs, then simulate sleep reaching the exact overall deadline
+// only after both readiness records are complete. Cleanup uses real elapsed
+// time after the jump. No assumed startup time or short sleep determines order.
+class ReadyDeadlineClock final : public shrink::detail::ExecutionBackend {
+public:
+    std::unique_ptr<shrink::detail::ExecutionBackend> native = shrink::detail::make_mac_execution_backend();
+    std::optional<std::uint64_t> jumped_at;
+    std::vector<pid_t> children;
+    std::vector<shrink::ProgramRole> stops;
+    std::uint64_t now_ms() override {
+        const auto now = native->now_ms();
+        if (!jumped_at) {
+            pid_t solution = 0, reference = 0;
+            std::ifstream left("solution-ready"), right("reference-ready");
+            if (!(left >> solution) || !(right >> reference) || solution <= 0 || reference <= 0) return 0;
+            jumped_at = now;
+        }
+        return 1000 + now - *jumped_at;
+    }
+    std::optional<shrink::RunnerError> launch(shrink::ProgramRole role, const shrink::ProgramSpec& program, std::string_view input) override {
+        auto error = native->launch(role, program, input);
+        if (const auto pid = native->process_id(role)) children.push_back(*pid);
+        return error;
+    }
+    std::vector<shrink::detail::ExecutionEvent> service(shrink::CancellationToken cancellation, int wait_ms) override {
+        return native->service(cancellation, wait_ms);
+    }
+    std::optional<shrink::RunnerError> stop(shrink::ProgramRole role) override { stops.push_back(role); return native->stop(role); }
+    bool pending(shrink::ProgramRole role) const override { return native->pending(role); }
+    std::optional<int> process_id(shrink::ProgramRole role) const override { return native->process_id(role); }
+    shrink::PendingOwnership ownership(shrink::ProgramRole role) const override { return native->ownership(role); }
+};
+}
+TEST_CASE("CLI overall expiry terminates both real programs and retains only verified recovery", "[cli-time-limit]") {
+    struct Case { bool verified; bool fail_final; };
+    for (const auto& test : {Case{false, false}, Case{true, false}, Case{true, true}}) {
+        const auto verified = test.verified;
+        Workspace workspace;
+        const std::string threshold = verified ? "3" : "4";
+        auto arguments = fixture_arguments(workspace, {"wait-below-length", "solution-ready", "1", threshold},
+                                                      {"wait-below-length", "reference-ready", "2", threshold});
+        arguments.erase(arguments.begin() + 16);
+        arguments.insert(arguments.end(), {"--time-limit=1s", "--solution-timeout=10s", "--reference-timeout=10s"});
+        auto backend = std::make_unique<ReadyDeadlineClock>(); auto* observed = backend.get();
+        shrink::Runner runner(std::move(backend));
+        shrink::cli::InvocationServices services; services.runner = &runner;
+        services.save = [&](const fs::path& path, const shrink::SaveRequest& save) -> shrink::SaveResult {
+            if (test.fail_final && save.kind == shrink::SaveKind::final)
+                return shrink::SaveError{shrink::SaveErrorCode::replace, "final save after expiry", path, std::make_error_code(std::errc::permission_denied)};
+            return shrink::cli::save_atomic(path, save);
+        };
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == (test.fail_final ? 1 : 4));
+        REQUIRE(observed->jumped_at);
+        REQUIRE(observed->stops == std::vector{shrink::ProgramRole::solution, shrink::ProgramRole::reference});
+        REQUIRE_FALSE(runner.has_pending_ownership());
+        REQUIRE(observed->children.size() == (verified ? 4 : 2));
+        for (auto child : observed->children) {
+            int status = 0;
+            REQUIRE(waitpid(child, &status, WNOHANG) == -1);
+            REQUIRE(errno == ECHILD);
+        }
+        REQUIRE(output.str() == (test.fail_final ? "3\n7 -2 7\n" : ""));
+        REQUIRE(workspace.read("result.txt") == (verified ? "3\n7 -2 7\n" : "previous result\n"));
+        REQUIRE(errors.str().find("Observed: overall time limit") != std::string::npos);
+        REQUIRE(errors.str().find("Observed: caller cancellation") == std::string::npos);
+        REQUIRE(errors.str().find("irreducibility was not established") != std::string::npos);
+        REQUIRE(errors.str().find(verified ? "Final: both programs succeeded" : "No verified result was produced") != std::string::npos);
     }
 }

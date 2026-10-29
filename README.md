@@ -257,6 +257,26 @@ and filesystem operations can delay stopping. The overall sleep-inclusive budget
 starts immediately before verification and includes callback/save time; cleanup
 and final saving can extend beyond it.
 
+`--time-limit` accepts a positive whole duration with `ms` or `s`; no overall
+limit is enabled by default. Timing starts after request validation and input
+normalization, immediately before baseline execution. Native timing uses
+`mach_continuous_time`, which includes computer sleep and is unaffected by
+calendar-clock adjustments. The elapsed budget includes candidate generation,
+validation, cache work, program execution and initial/periodic saves. Observing
+elapsed time equal to the limit expires unfinished work, which is discarded
+without acceptance or caching.
+
+Overall expiry stops both active programs through the runner's normal bounded
+cleanup. It remains distinct from caller cancellation and per-program timeouts,
+including pending-setup errors. Before verification it returns status 4 with no
+verified recovery input and leaves the destination unchanged. After verification
+it retains the best and attempts one final save, with partial/no-round counts
+and no irreducibility claim. Operational errors require status 1 while retaining
+observed time/cancellation reasons. Cleanup and final saving may exceed the
+budget; completed-search guarantees survive expiry during final saving. These
+are prompt checks when scheduled, without hard callback, filesystem or kernel
+operation bounds.
+
 Ctrl-C handling belongs to the terminal adapter, which records SIGINT in a
 signal-safe flag and checks it from ordinary code. Supplied programs run in
 separate process groups, retaining their intended signal masks/dispositions;

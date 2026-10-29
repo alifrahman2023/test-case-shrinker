@@ -20,7 +20,8 @@ public:
     std::array<int, 2> exit_codes{};
     std::optional<RunnerError> failure;
     std::function<void(std::string_view)> on_evaluation;
-    std::uint64_t now_ms() override { return clock; }
+    std::function<void()> on_clock;
+    std::uint64_t now_ms() override { if (on_clock) on_clock(); return clock; }
     std::optional<RunnerError> launch(ProgramRole role, const ProgramSpec&, std::string_view input) override {
         if (role == ProgramRole::solution && on_evaluation) on_evaluation(input);
         inputs.emplace_back(input); active[program_index(role)] = true; return {};
@@ -1005,4 +1006,170 @@ TEST_CASE("final-round uncertainty includes cache hits learned before an accepta
     REQUIRE(cached.statistics.distinct_inconclusive_candidates == 4);
     REQUIRE(plain.statistics.distinct_inconclusive_candidates == 4);
     check_local_guarantee(cached, input.constraints, 0, preserves);
+}
+TEST_CASE("overall deadline exact boundary distinguishes verified from unfinished baselines", "[reduction][time-limit]") {
+    for (std::uint64_t delay : {49, 50}) {
+        auto backend = std::make_unique<BaselineBackend>(); backend->service_delay = delay;
+        Runner runner(std::move(backend));
+        auto input = request(); input.limits.time_limit = std::chrono::milliseconds(50);
+        std::vector<SaveKind> saves;
+        RunHooks hooks; hooks.save = [&](const SaveRequest& save) -> SaveResult { saves.push_back(save.kind); return {}; };
+        auto result = reduce(std::move(input), runner, {}, hooks);
+        REQUIRE(result.statistics.elapsed_ms == delay);
+        REQUIRE_FALSE(result.observed_reasons.cancellation);
+        REQUIRE(result.observed_reasons.time_limit == (delay == 50));
+        if (delay == 49) {
+            REQUIRE(result.best);
+            REQUIRE(result.outcome == RunOutcome::evaluation_limit);
+            REQUIRE(saves == std::vector{SaveKind::initial, SaveKind::final});
+        } else {
+            REQUIRE_FALSE(result.best);
+            REQUIRE(result.outcome == RunOutcome::time_limit);
+            REQUIRE(result.baseline.status == BaselineStatus::interrupted);
+            REQUIRE(result.statistics.round == RoundStatus::not_started);
+            REQUIRE(saves.empty());
+        }
+    }
+}
+TEST_CASE("sleep-inclusive search expiry discards unfinished work and no overall budget is the default", "[reduction][time-limit]") {
+    for (bool limited : {true, false}) {
+        auto backend = std::make_unique<BaselineBackend>(); auto* clock = backend.get();
+        clock->on_evaluation = [clock](std::string_view text) { if (!text.starts_with("3\n")) clock->service_delay = 3'600'000; };
+        Runner runner(std::move(backend));
+        auto input = request(); input.limits.max_evaluations = 1;
+        input.limits.solution_timeout = input.limits.reference_timeout = std::chrono::hours(2);
+        if (limited) input.limits.time_limit = std::chrono::seconds(1);
+        std::vector<std::uint64_t> saved;
+        RunHooks hooks; hooks.save = [&](const SaveRequest& save) -> SaveResult { saved.push_back(save.revision); return {}; };
+        auto result = reduce(std::move(input), runner, {}, hooks);
+        REQUIRE(result.outcome == (limited ? RunOutcome::time_limit : RunOutcome::evaluation_limit));
+        REQUIRE(result.observed_reasons.time_limit == limited);
+        REQUIRE_FALSE(result.observed_reasons.cancellation);
+        REQUIRE(result.statistics.candidate_evaluations == 1);
+        REQUIRE(result.statistics.acceptances == (limited ? 0 : 1));
+        REQUIRE(result.best->revision == (limited ? 1 : 2));
+        REQUIRE(result.statistics.elapsed_ms == 3'600'000);
+        REQUIRE(result.statistics.round == RoundStatus::partial);
+        REQUIRE(result.pending_ownership.empty());
+        REQUIRE(result.errors.empty());
+        REQUIRE(saved.front() == 1);
+        REQUIRE(saved.back() == result.best->revision);
+    }
+}
+TEST_CASE("checkpoint expiry preserves the accepted best and all error and cancellation observations", "[reduction][time-limit]") {
+    for (bool fail : {false, true}) {
+        auto backend = std::make_unique<BaselineBackend>(); auto* clock = backend.get();
+        clock->service_delay = 600;
+        Runner runner(std::move(backend));
+        auto input = request(); input.limits.max_evaluations.reset(); input.limits.time_limit = std::chrono::milliseconds(3000);
+        CancellationSource source;
+        std::vector<SaveKind> saves;
+        RunHooks hooks;
+        hooks.save = [&](const SaveRequest& save) -> SaveResult {
+            saves.push_back(save.kind);
+            if (save.kind == SaveKind::periodic) {
+                clock->clock += 1200;
+                if (fail) { source.request_stop(); throw std::runtime_error("checkpoint failed at deadline"); }
+            }
+            if (save.kind == SaveKind::final) clock->clock += 500;
+            return {};
+        };
+        auto result = reduce(std::move(input), runner, source.token(), hooks);
+        REQUIRE(result.outcome == (fail ? RunOutcome::operational_stop : RunOutcome::time_limit));
+        REQUIRE(result.observed_reasons.time_limit);
+        REQUIRE(result.observed_reasons.cancellation == fail);
+        REQUIRE(result.statistics.candidate_evaluations == 2);
+        REQUIRE(result.statistics.acceptances == 2);
+        REQUIRE(result.best->normalized_input == "1\n7\n");
+        REQUIRE(result.statistics.round == RoundStatus::partial);
+        REQUIRE(result.statistics.elapsed_ms == 3500);
+        REQUIRE(saves == std::vector{SaveKind::initial, SaveKind::periodic, SaveKind::final});
+        REQUIRE(result.saving.last_saved_revision == 3);
+        REQUIRE(result.saving.final_outcome == FinalSaveOutcome::succeeded);
+        REQUIRE(result.errors.size() == (fail ? 1 : 0));
+    }
+}
+TEST_CASE("completed search facts survive final saving that runs beyond the overall deadline", "[reduction][time-limit]") {
+    for (bool fail : {false, true}) {
+        auto backend = std::make_unique<BaselineBackend>(); auto* clock = backend.get();
+        Runner runner(std::move(backend));
+        auto input = request(); input.input_text = "1 0"; input.constraints = {1, 1, 0, 0};
+        input.limits.max_evaluations.reset(); input.limits.time_limit = std::chrono::milliseconds(50);
+        RunHooks hooks;
+        hooks.save = [&](const SaveRequest& save) -> SaveResult {
+            if (save.kind == SaveKind::final) {
+                clock->clock += 100;
+                if (fail) throw std::runtime_error("final saving after completion");
+            }
+            return {};
+        };
+        auto result = reduce(std::move(input), runner, {}, hooks);
+        REQUIRE(result.outcome == RunOutcome::completed);
+        REQUIRE(result.statistics.round == RoundStatus::complete);
+        REQUIRE(result.observed_reasons.time_limit);
+        REQUIRE_FALSE(result.observed_reasons.cancellation);
+        REQUIRE(result.statistics.elapsed_ms == 100);
+        REQUIRE(result.best->evidence == result.baseline.evaluation);
+        REQUIRE(result.saving.final_outcome == (fail ? FinalSaveOutcome::failed : FinalSaveOutcome::succeeded));
+        REQUIRE(result.errors.size() == (fail ? 1 : 0));
+    }
+}
+TEST_CASE("overall expiry checks candidate processing even when invalid or cached moves launch nothing", "[reduction][time-limit]") {
+    for (bool invalid : {true, false}) {
+        auto backend = std::make_unique<BaselineBackend>(); auto* clock = backend.get();
+        bool processing = false;
+        clock->on_clock = [clock, &processing] { if (processing) ++clock->clock; };
+        clock->on_evaluation = [clock](std::string_view text) { if (!text.starts_with("128\n")) clock->reference_output = "1"; };
+        Runner runner(std::move(backend));
+        auto input = request(); input.input_text = "128";
+        for (int index = 0; index < 128; ++index) input.input_text += " 0";
+        input.constraints = {invalid ? 128 : 0, 128, 0, 0};
+        input.limits.max_evaluations.reset(); input.limits.time_limit = std::chrono::milliseconds(1000);
+        std::vector<SaveKind> saves;
+        RunHooks hooks;
+        hooks.notify = [&](const RunEvent& event) { if (event.kind == RunEventKind::baseline_verified) processing = true; };
+        hooks.save = [&](const SaveRequest& save) -> SaveResult { saves.push_back(save.kind); return {}; };
+        auto result = reduce(std::move(input), runner, {}, hooks);
+        REQUIRE(result.outcome == RunOutcome::time_limit);
+        REQUIRE(result.observed_reasons.time_limit);
+        REQUIRE_FALSE(result.observed_reasons.cancellation);
+        REQUIRE(result.statistics.round == RoundStatus::partial);
+        REQUIRE(result.statistics.acceptances == 0);
+        REQUIRE(result.statistics.candidate_evaluations <= 7);
+        REQUIRE(result.statistics.candidate_evaluations == result.statistics.lost_executions);
+        if (invalid) REQUIRE(result.statistics.candidate_evaluations == 0);
+        else REQUIRE(result.statistics.candidate_evaluations > 0);
+        REQUIRE(result.best->revision == 1);
+        REQUIRE(saves == std::vector{SaveKind::initial, SaveKind::final});
+    }
+}
+TEST_CASE("request validation finishes before the overall elapsed clock starts", "[reduction][time-limit]") {
+    auto backend = std::make_unique<BaselineBackend>(); auto* clock = backend.get();
+    unsigned clock_reads = 0; clock->on_clock = [&] { ++clock_reads; };
+    Runner runner(std::move(backend));
+    auto input = request(); input.input_text = "invalid"; input.limits.time_limit = std::chrono::milliseconds(1);
+    auto result = reduce(std::move(input), runner);
+    REQUIRE(result.outcome == RunOutcome::invalid_request);
+    REQUIRE(clock_reads == 0);
+    REQUIRE(clock->inputs.empty());
+    REQUIRE_FALSE(result.best);
+}
+TEST_CASE("cleanup errors retain simultaneous caller cancellation and overall expiry before verification", "[reduction][time-limit]") {
+    auto backend = std::make_unique<BaselineBackend>();
+    CancellationSource source;
+    backend->on_evaluation = [&](std::string_view) { source.request_stop(); };
+    backend->service_delay = 50;
+    backend->failure = RunnerError{RunnerErrorCode::cleanup, {}, EIO, "cleanup failed at expiry"};
+    Runner runner(std::move(backend));
+    auto input = request(); input.limits.time_limit = std::chrono::milliseconds(50);
+    unsigned saves = 0;
+    RunHooks hooks; hooks.save = [&](const SaveRequest&) -> SaveResult { ++saves; return {}; };
+    auto result = reduce(std::move(input), runner, source.token(), hooks);
+    REQUIRE(result.outcome == RunOutcome::operational_stop);
+    REQUIRE(result.observed_reasons.cancellation);
+    REQUIRE(result.observed_reasons.time_limit);
+    REQUIRE(result.errors[0].kind == RunErrorKind::cleanup);
+    REQUIRE_FALSE(result.best);
+    REQUIRE(saves == 0);
+    REQUIRE(result.statistics.round == RoundStatus::not_started);
 }
