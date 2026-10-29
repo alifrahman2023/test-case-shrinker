@@ -24,8 +24,8 @@ int main(int argc, char** argv) {
         if (!record) return 96;
         std::cout << argv[3];
     }
-    else if (mode == "fail-stderr" && argc == 3) {
-        emit(std::cerr, std::stoull(argv[2]), 'e'); return 7;
+    else if (mode == "fail-stderr" && (argc == 3 || argc == 4)) {
+        emit(std::cerr, std::stoull(argv[2]), argc == 4 ? static_cast<char>(std::stoi(argv[3])) : 'e'); return 7;
     }
     else if (mode == "emit" && argc == 4) {
         emit(std::cout, std::stoull(argv[2]), 'x');

@@ -7,17 +7,23 @@ namespace {
 std::string preview(std::string_view bytes, std::size_t limit) {
     std::string text = "\"";
     constexpr char hex[] = "0123456789abcdef";
-    for (unsigned char byte : bytes.substr(0, limit)) {
-        if (byte == '\n') text += "\\n";
-        else if (byte == '\r') text += "\\r";
-        else if (byte == '\t') text += "\\t";
-        else if (byte == '"' || byte == '\\') { text += '\\'; text += byte; }
+    std::size_t consumed = 0;
+    for (unsigned char byte : bytes) {
+        std::string escaped;
+        if (byte == '\n') escaped = "\\n";
+        else if (byte == '\r') escaped = "\\r";
+        else if (byte == '\t') escaped = "\\t";
+        else if (byte == '"' || byte == '\\') { escaped += '\\'; escaped += byte; }
         else if (byte < 32 || byte >= 127) {
-            text += "\\x"; text += hex[byte >> 4]; text += hex[byte & 15];
-        } else text += byte;
+            escaped = "\\x"; escaped += hex[byte >> 4]; escaped += hex[byte & 15];
+        } else escaped += byte;
+        // The cap applies to rendered bytes, including escape expansion.
+        if (text.size() - 1 + escaped.size() > limit) break;
+        text += escaped;
+        ++consumed;
     }
     text += '"';
-    if (bytes.size() > limit) text += " [presentation truncated]";
+    if (consumed < bytes.size()) text += " [presentation truncated]";
     return text;
 }
 void evidence(std::ostream& errors, const char* label, const Evaluation& evaluation) {

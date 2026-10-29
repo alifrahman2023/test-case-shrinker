@@ -143,12 +143,13 @@ TEST_CASE("overall deadline interrupts baseline and prevents any save", "[reduct
     REQUIRE(result.baseline.status == BaselineStatus::interrupted);
 }
 TEST_CASE("ordinary rejected baselines and cleanup errors never save or establish a best", "[reduction]") {
-    for (int scenario = 0; scenario < 4; ++scenario) {
+    for (auto status : {BaselineStatus::agreement, BaselineStatus::solution_unsuccessful,
+                        BaselineStatus::reference_unsuccessful, BaselineStatus::operational_failure}) {
         auto backend = std::make_unique<BaselineBackend>();
-        if (scenario == 0) backend->reference_output = "  1 \n";
-        if (scenario == 1) backend->exit_codes[0] = 7;
-        if (scenario == 2) backend->exit_codes[1] = 127;
-        if (scenario == 3) backend->failure = RunnerError{RunnerErrorCode::cleanup, {}, EIO, "cleanup"};
+        if (status == BaselineStatus::agreement) backend->reference_output = "  1 \n";
+        if (status == BaselineStatus::solution_unsuccessful) backend->exit_codes[0] = 7;
+        if (status == BaselineStatus::reference_unsuccessful) backend->exit_codes[1] = 127;
+        if (status == BaselineStatus::operational_failure) backend->failure = RunnerError{RunnerErrorCode::cleanup, {}, EIO, "cleanup"};
         Runner runner(std::move(backend));
         unsigned saves = 0, notifications = 0;
         RunHooks hooks;
@@ -158,11 +159,9 @@ TEST_CASE("ordinary rejected baselines and cleanup errors never save or establis
         REQUIRE_FALSE(result.best);
         REQUIRE(saves == 0);
         REQUIRE(notifications == 0);
-        REQUIRE(result.outcome == (scenario == 3 ? RunOutcome::operational_stop : RunOutcome::baseline_rejected));
-        if (scenario == 0) REQUIRE(result.baseline.status == BaselineStatus::agreement);
-        if (scenario == 1) REQUIRE(result.baseline.status == BaselineStatus::solution_unsuccessful);
-        if (scenario == 2) REQUIRE(result.baseline.status == BaselineStatus::reference_unsuccessful);
-        if (scenario == 3) REQUIRE(result.errors[0].kind == RunErrorKind::cleanup);
+        REQUIRE(result.outcome == (status == BaselineStatus::operational_failure ? RunOutcome::operational_stop : RunOutcome::baseline_rejected));
+        REQUIRE(result.baseline.status == status);
+        if (status == BaselineStatus::operational_failure) REQUIRE(result.errors[0].kind == RunErrorKind::cleanup);
     }
 }
 TEST_CASE("invalid and pre-cancelled requests launch no programs and preserve absence of a best", "[reduction]") {

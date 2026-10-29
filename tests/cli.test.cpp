@@ -391,14 +391,20 @@ TEST_CASE("CLI leaves an existing default output unchanged on rejection", "[cli]
     REQUIRE(workspace.read("reduced.txt") == "previous default result\n");
 }
 
+namespace {
+std::vector<std::string> fixture_arguments(const Workspace& workspace, const std::vector<std::string>& solution,
+                                          const std::vector<std::string>& reference) {
+    auto arguments = workspace.arguments();
+    arguments[3] = SHRINK_PROGRAM_FIXTURE; arguments[5] = SHRINK_PROGRAM_FIXTURE;
+    arguments.push_back("--max-evaluations=0");
+    for (const auto& argument : solution) arguments.push_back("--solution-arg=" + argument);
+    for (const auto& argument : reference) arguments.push_back("--reference-arg=" + argument);
+    return arguments;
+}
+}
 TEST_CASE("CLI verifies and replaces a zero-budget baseline with exact-token evidence", "[cli-baseline]") {
     Workspace workspace;
-    workspace.write("solution", "#!/bin/sh\nprintf '1'\n");
-    workspace.write("reference", "#!/bin/sh\nprintf '1.0'\n");
-    fs::permissions("solution", fs::perms::owner_all);
-    fs::permissions("reference", fs::perms::owner_all);
-    auto arguments = workspace.arguments(); arguments[3] = "./solution"; arguments[5] = "./reference";
-    arguments.push_back("--max-evaluations=0");
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "1.0"});
     std::ostringstream output, errors;
     REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
     REQUIRE(output.str().empty());
@@ -411,11 +417,7 @@ TEST_CASE("CLI verifies and replaces a zero-budget baseline with exact-token evi
 }
 TEST_CASE("CLI final-save failure emits complete normalized recovery and reports file context", "[cli-baseline]") {
     Workspace workspace;
-    workspace.write("solution", "#!/bin/sh\nprintf 1\n");
-    workspace.write("reference", "#!/bin/sh\nprintf 2\n");
-    fs::permissions("solution", fs::perms::owner_all); fs::permissions("reference", fs::perms::owner_all);
-    auto arguments = workspace.arguments(); arguments[3] = "./solution"; arguments[5] = "./reference";
-    arguments.push_back("--max-evaluations=0");
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"});
     shrink::cli::InvocationServices services;
     unsigned calls = 0;
     services.save = [&](const fs::path& path, const shrink::SaveRequest&) -> shrink::SaveResult {
@@ -433,17 +435,6 @@ TEST_CASE("CLI final-save failure emits complete normalized recovery and reports
     REQUIRE(errors.str().find("Final save: failed") != std::string::npos);
 }
 
-namespace {
-std::vector<std::string> fixture_arguments(const Workspace& workspace, const std::vector<std::string>& solution,
-                                          const std::vector<std::string>& reference) {
-    auto arguments = workspace.arguments();
-    arguments[3] = SHRINK_PROGRAM_FIXTURE; arguments[5] = SHRINK_PROGRAM_FIXTURE;
-    arguments.push_back("--max-evaluations=0");
-    for (const auto& argument : solution) arguments.push_back("--solution-arg=" + argument);
-    for (const auto& argument : reference) arguments.push_back("--reference-arg=" + argument);
-    return arguments;
-}
-}
 TEST_CASE("CLI explains unsuccessful solution and reference baseline executions", "[cli-baseline]") {
     Workspace workspace;
     for (const auto& [solution, reference, fact] : std::vector<std::tuple<std::vector<std::string>, std::vector<std::string>, std::string>>{
@@ -605,22 +596,47 @@ TEST_CASE("CLI token previews escape bytes, mark truncation, and expose end of o
 }
 TEST_CASE("CLI reports timeout, peer stop, overall expiry, and launch errors distinctly", "[cli-baseline]") {
     Workspace workspace;
-    for (int scenario = 0; scenario < 4; ++scenario) {
-        auto solution = scenario == 1 ? std::vector<std::string>{"text", "1"}
-                                     : std::vector<std::string>{"rendezvous", "ready", "missing"};
-        auto arguments = fixture_arguments(workspace, solution, {"rendezvous", "other-ready", "missing"});
-        if (scenario == 0) arguments.push_back("--solution-timeout=100ms");
-        if (scenario == 1) arguments.push_back("--reference-timeout=100ms");
-        if (scenario == 2) arguments.push_back("--time-limit=100ms");
-        if (scenario == 3) arguments[3] = "./missing-program";
+    struct Case {
+        const char* name;
+        std::vector<std::string> solution;
+        std::vector<std::string> reference;
+        std::string limit;
+        int expected_exit;
+        std::vector<std::string> facts;
+        const char* executable = SHRINK_PROGRAM_FIXTURE;
+    };
+    for (const auto& test : std::vector<Case>{
+        {"solution timeout", {"rendezvous", "ready", "missing"}, {"rendezvous", "other-ready", "missing"},
+         "--solution-timeout=100ms", 3, {"timeout", "peer stop"}},
+        {"reference timeout", {"text", "1"}, {"rendezvous", "other-ready", "missing"},
+         "--reference-timeout=100ms", 3, {"unsuccessful reference execution (inconclusive)"}},
+        {"overall expiry", {"rendezvous", "ready", "missing"}, {"rendezvous", "other-ready", "missing"},
+         "--time-limit=100ms", 4, {"overall time limit"}},
+        {"launch failure", {}, {"text", "2"}, "", 1, {"Error:"}, "./missing-program"}}) {
+        INFO(test.name);
+        auto arguments = fixture_arguments(workspace, test.solution, test.reference);
+        arguments[3] = test.executable;
+        if (!test.limit.empty()) arguments.push_back(test.limit);
         std::ostringstream output, errors;
-        const int expected = scenario < 2 ? 3 : scenario == 2 ? 4 : 1;
-        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == expected);
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == test.expected_exit);
         REQUIRE(output.str().empty());
         REQUIRE(workspace.read("result.txt") == "previous result\n");
-        if (scenario == 0) { REQUIRE(errors.str().find("timeout") != std::string::npos); REQUIRE(errors.str().find("peer stop") != std::string::npos); }
-        if (scenario == 1) REQUIRE(errors.str().find("unsuccessful reference execution (inconclusive)") != std::string::npos);
-        if (scenario == 2) REQUIRE(errors.str().find("overall time limit") != std::string::npos);
-        if (scenario == 3) REQUIRE(errors.str().find("Error:") != std::string::npos);
+        for (const auto& fact : test.facts) REQUIRE(errors.str().find(fact) != std::string::npos);
     }
+}
+TEST_CASE("CLI caps stderr preview after escaping control bytes", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"fail-stderr", "70000", "1"}, {"text", "2"});
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 3);
+    const auto text = errors.str();
+    const auto begin = text.find("  stderr: \"");
+    REQUIRE(begin != std::string::npos);
+    const auto content = begin + std::string("  stderr: \"").size();
+    const auto end = text.find('"', content);
+    REQUIRE(end != std::string::npos);
+    REQUIRE(end - content <= 4096);
+    REQUIRE(text.find("\\x01") != std::string::npos);
+    REQUIRE(text.find("[presentation truncated]") != std::string::npos);
+    REQUIRE(text.find("retention truncated at 64 KiB") != std::string::npos);
 }
