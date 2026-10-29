@@ -390,7 +390,7 @@ TEST_CASE("removal sweeps left to right halves chunks and counts distinct inconc
     };
     Runner runner(std::move(backend));
     auto input = request(); input.input_text = "4 1 1 1 1"; input.limits.max_evaluations = 5;
-    auto result = reduce(std::move(input), runner);
+    auto result = reduce(std::move(input), runner, {}, {}, {.enabled = false});
     REQUIRE(result.outcome == RunOutcome::evaluation_limit);
     REQUIRE(result.statistics.inconclusive_executions == 5);
     REQUIRE(result.statistics.distinct_inconclusive_candidates == 2);
@@ -624,7 +624,7 @@ auto value_rank(std::int64_t value) {
     return std::pair{value < 0 ? -static_cast<__int128>(value) : static_cast<__int128>(value), value < 0};
 }
 ReductionResult scripted_reduction(ReductionRequest input, const Predicate& predicate,
-                                   std::vector<std::string>* accepted = nullptr) {
+                                   std::vector<std::string>* accepted = nullptr, const detail::CacheControls& cache = {}) {
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
     const auto constraints = input.constraints;
     script->on_evaluation = [script, constraints, predicate](std::string_view text) {
@@ -648,7 +648,7 @@ ReductionResult scripted_reduction(ReductionRequest input, const Predicate& pred
         previous = event.best.values;
         if (accepted) accepted->push_back(event.best.normalized_input);
     };
-    return reduce(std::move(input), runner, {}, hooks);
+    return reduce(std::move(input), runner, {}, hooks, cache);
 }
 // Enumerate every promised direct local move on the exact result. This oracle
 // does not follow the search's chunk traversal, visitation or binary heuristic.
@@ -758,7 +758,7 @@ TEST_CASE("complete and partial inconclusive counts deduplicate texts and reset 
     Predicate only_original = [](const Values& v) { return v == Values{5, 5} ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
     auto result = scripted_reduction(input, only_original);
     REQUIRE(result.outcome == RunOutcome::completed);
-    REQUIRE(result.statistics.inconclusive_executions == 8);
+    REQUIRE(result.statistics.inconclusive_executions == 7);
     REQUIRE(result.statistics.distinct_inconclusive_candidates == 7);
     check_local_guarantee(result, input.constraints, 0, only_original);
     input.limits.max_evaluations = 2;
@@ -766,30 +766,30 @@ TEST_CASE("complete and partial inconclusive counts deduplicate texts and reset 
     REQUIRE(partial.outcome == RunOutcome::evaluation_limit);
     REQUIRE(partial.statistics.round == RoundStatus::partial);
     REQUIRE(partial.statistics.inconclusive_executions == 2);
-    REQUIRE(partial.statistics.distinct_inconclusive_candidates == 1);
+    REQUIRE(partial.statistics.distinct_inconclusive_candidates == 2);
     input.limits.max_evaluations.reset();
     Predicate equal_pair = [](const Values& v) { return v.size() == 2 && v[0] == v[1] ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
     auto simplified = scripted_reduction(input, equal_pair);
     REQUIRE(simplified.best->values == Values{0, 0});
-    REQUIRE(simplified.statistics.inconclusive_executions == 4);
+    REQUIRE(simplified.statistics.inconclusive_executions == 2);
     REQUIRE(simplified.statistics.distinct_inconclusive_candidates == 1);
     check_local_guarantee(simplified, input.constraints, 0, equal_pair);
 }
 TEST_CASE("exact evaluation limits distinguish completed uncertainty from an unfinished round", "[reduction][values]") {
     auto input = request(); input.input_text = "2 5 5"; input.constraints = {0, 2, 0, 5};
     Predicate only_original = [](const Values& v) { return v == Values{5, 5} ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
-    input.limits.max_evaluations = 8;
+    input.limits.max_evaluations = 7;
     auto complete = scripted_reduction(input, only_original);
     REQUIRE(complete.outcome == RunOutcome::completed);
     REQUIRE(complete.observed_reasons.evaluation_limit);
     REQUIRE(complete.statistics.round == RoundStatus::complete);
-    REQUIRE(complete.statistics.candidate_evaluations == 8);
+    REQUIRE(complete.statistics.candidate_evaluations == 7);
     REQUIRE(complete.best->evidence == complete.baseline.evaluation);
-    input.limits.max_evaluations = 7;
+    input.limits.max_evaluations = 6;
     auto partial = scripted_reduction(input, only_original);
     REQUIRE(partial.outcome == RunOutcome::evaluation_limit);
     REQUIRE(partial.statistics.round == RoundStatus::partial);
-    REQUIRE(partial.statistics.candidate_evaluations == 7);
+    REQUIRE(partial.statistics.candidate_evaluations == 6);
 }
 TEST_CASE("cancellation during value evaluation and acceptance preserves verified recovery", "[reduction][values]") {
     for (bool during_evaluation : {true, false}) {
@@ -828,4 +828,163 @@ TEST_CASE("final save errors preserve completed search facts and verified eviden
     REQUIRE(result.saving.final_outcome == FinalSaveOutcome::failed);
     REQUIRE(result.saving.last_saved_revision == 1);
     REQUIRE(result.errors[0].kind == RunErrorKind::save);
+}
+TEST_CASE("repeated inconclusive candidate texts execute once without changing complete-round counts", "[reduction][cache]") {
+    auto input = request(); input.input_text = "2 5 5"; input.constraints = {0, 2, 0, 5}; input.limits.max_evaluations = 7;
+    Predicate only_original = [](const Values& v) { return v == Values{5, 5} ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
+    auto result = scripted_reduction(input, only_original);
+    REQUIRE(result.outcome == RunOutcome::completed);
+    REQUIRE(result.statistics.candidate_evaluations == 7);
+    REQUIRE(result.statistics.inconclusive_executions == 7);
+    REQUIRE(result.statistics.distinct_inconclusive_candidates == 7);
+    REQUIRE(result.statistics.round == RoundStatus::complete);
+    REQUIRE(result.best->evidence == result.baseline.evaluation);
+}
+TEST_CASE("forced fingerprint collisions cannot skip preserving candidates or change completed sequences", "[reduction][cache]") {
+    auto input = request(); input.input_text = "3 42 7 42"; input.constraints = {0, 3, 0, 42}; input.limits.max_evaluations.reset();
+    Predicate duplicates = [](const Values& values) {
+        return std::set<std::int64_t>(values.begin(), values.end()).size() < values.size()
+            ? CandidateOutcome::preserved : CandidateOutcome::lost;
+    };
+    std::vector<std::string> expected;
+    auto uncached = scripted_reduction(input, duplicates, &expected, {.enabled = false});
+    REQUIRE(expected == std::vector<std::string>{"2\n42 42\n", "2\n0 0\n"});
+    for (const auto& controls : std::vector<detail::CacheControls>{
+        {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0},
+        {.max_text_bytes = 5, .forced_fingerprint = 0}, {.max_entries = 0}, {.max_text_bytes = 0}}) {
+        std::vector<std::string> accepted;
+        auto result = scripted_reduction(input, duplicates, &accepted, controls);
+        REQUIRE(result.outcome == RunOutcome::completed);
+        REQUIRE(result.best->normalized_input == uncached.best->normalized_input);
+        REQUIRE(accepted == expected);
+        REQUIRE(result.statistics.distinct_inconclusive_candidates == uncached.statistics.distinct_inconclusive_candidates);
+        REQUIRE(result.statistics.candidate_evaluations <= uncached.statistics.candidate_evaluations);
+        check_local_guarantee(result, input.constraints, 0, duplicates);
+    }
+}
+TEST_CASE("cached inconclusive outcomes remain distinct by exact text despite collisions eviction and rounds", "[reduction][cache]") {
+    auto input = request(); input.input_text = "2 5 5"; input.constraints = {0, 2, 0, 5}; input.limits.max_evaluations.reset();
+    Predicate only_original = [](const Values& v) { return v == Values{5, 5} ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
+    auto uncached = scripted_reduction(input, only_original, nullptr, {.enabled = false});
+    REQUIRE(uncached.statistics.inconclusive_executions == 8);
+    for (const auto& controls : std::vector<detail::CacheControls>{
+        {}, {.forced_fingerprint = 1}, {.max_entries = 1, .forced_fingerprint = 1}, {.max_text_bytes = 5}}) {
+        auto result = scripted_reduction(input, only_original, nullptr, controls);
+        REQUIRE(result.outcome == RunOutcome::completed);
+        REQUIRE(result.best->normalized_input == uncached.best->normalized_input);
+        REQUIRE(result.statistics.inconclusive_executions == 7);
+        REQUIRE(result.statistics.distinct_inconclusive_candidates == 7);
+    }
+    Predicate equal_pair = [](const Values& v) { return v.size() == 2 && v[0] == v[1] ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
+    auto cached = scripted_reduction(input, equal_pair, nullptr, {.forced_fingerprint = 0});
+    auto plain = scripted_reduction(input, equal_pair, nullptr, {.enabled = false});
+    REQUIRE(cached.best->values == Values{0, 0});
+    REQUIRE(cached.best->normalized_input == plain.best->normalized_input);
+    REQUIRE(cached.statistics.inconclusive_executions == 2);
+    REQUIRE(plain.statistics.inconclusive_executions == 4);
+    REQUIRE(cached.statistics.distinct_inconclusive_candidates == 1);
+    REQUIRE(plain.statistics.distinct_inconclusive_candidates == 1);
+}
+TEST_CASE("lost outcomes save executions while cache capacity changes only work performed", "[reduction][cache]") {
+    auto input = request(); input.input_text = "2 5 5"; input.constraints = {0, 2, 0, 5}; input.limits.max_evaluations.reset();
+    Predicate pair = [](const Values& v) { return v.size() == 2 && v[0] == v[1] ? CandidateOutcome::preserved : CandidateOutcome::lost; };
+    std::vector<std::string> expected;
+    auto plain = scripted_reduction(input, pair, &expected, {.enabled = false});
+    auto cached = scripted_reduction(input, pair);
+    auto evicted = scripted_reduction(input, pair, nullptr, {.max_entries = 1, .max_text_bytes = 4, .forced_fingerprint = 0});
+    REQUIRE(cached.statistics.lost_executions < plain.statistics.lost_executions);
+    REQUIRE(cached.best->normalized_input == plain.best->normalized_input);
+    REQUIRE(evicted.best->normalized_input == plain.best->normalized_input);
+    REQUIRE(cached.statistics.acceptances == plain.statistics.acceptances);
+    REQUIRE(cached.statistics.distinct_inconclusive_candidates == 0);
+    REQUIRE(evicted.outcome == RunOutcome::completed);
+}
+TEST_CASE("errors cancelled evaluations and prior invocation cache state are never reused", "[reduction][cache]") {
+    for (bool failure : {true, false}) {
+        auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
+        CancellationSource source;
+        bool first_run = true;
+        std::size_t baseline_launches = 0, candidate_launches = 0;
+        script->on_evaluation = [&](std::string_view text) {
+            if (text == "1\n5\n") { ++baseline_launches; return; }
+            ++candidate_launches;
+            if (!first_run) return;
+            if (failure) script->failure = RunnerError{RunnerErrorCode::io, {}, EIO, "candidate failure"};
+            else source.request_stop();
+        };
+        Runner runner(std::move(backend));
+        auto input = request(); input.input_text = "1 5"; input.constraints = {1, 1, 0, 5}; input.limits.max_evaluations.reset();
+        auto interrupted = reduce(input, runner, source.token(), {}, {.forced_fingerprint = 0});
+        REQUIRE(interrupted.outcome == (failure ? RunOutcome::operational_stop : RunOutcome::cancelled));
+        REQUIRE(interrupted.best->values == Values{5});
+        REQUIRE(interrupted.statistics.acceptances == 0);
+        first_run = false; script->failure.reset();
+        auto fresh = reduce(input, runner, {}, {}, {.forced_fingerprint = 0});
+        REQUIRE(fresh.outcome == RunOutcome::completed);
+        REQUIRE(fresh.best->values == Values{0});
+        REQUIRE(baseline_launches == 2);
+        REQUIRE(candidate_launches == 2);
+    }
+    auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
+    unsigned candidate_launches = 0;
+    script->on_evaluation = [&](std::string_view text) {
+        if (text == "1\n1\n") { script->reference_output = "2"; return; }
+        ++candidate_launches; script->reference_output = "1";
+    };
+    Runner runner(std::move(backend));
+    auto input = request(); input.input_text = "1 1"; input.constraints = {1, 1, 0, 1}; input.limits.max_evaluations.reset();
+    for (int invocation = 0; invocation < 2; ++invocation) {
+        auto result = reduce(input, runner);
+        REQUIRE(result.outcome == RunOutcome::completed);
+        REQUIRE(result.statistics.candidate_evaluations == 1);
+        REQUIRE(result.statistics.lost_executions == 1);
+    }
+    REQUIRE(candidate_launches == 2);
+}
+TEST_CASE("cache hits after the last allowed execution can establish completion", "[reduction][cache]") {
+    auto input = request(); input.input_text = "1 1"; input.constraints = {1, 1, 0, 1}; input.limits.max_evaluations = 1;
+    Predicate only_original = [](const Values& v) { return v[0] == 1 ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
+    auto result = scripted_reduction(input, only_original);
+    REQUIRE(result.outcome == RunOutcome::completed);
+    REQUIRE(result.observed_reasons.evaluation_limit);
+    REQUIRE(result.statistics.candidate_evaluations == 1);
+    REQUIRE(result.statistics.inconclusive_executions == 1);
+    REQUIRE(result.statistics.distinct_inconclusive_candidates == 1);
+    auto no_cache = scripted_reduction(input, only_original, nullptr, {.enabled = false});
+    REQUIRE(no_cache.outcome == RunOutcome::evaluation_limit);
+    REQUIRE(no_cache.statistics.round == RoundStatus::partial);
+}
+TEST_CASE("eviction reexecutes old texts while completed binary-search sequences remain identical", "[reduction][cache]") {
+    auto input = request(); input.input_text = "1 100"; input.constraints = {1, 1, 0, 100}; input.limits.max_evaluations.reset();
+    Predicate threshold = [](const Values& v) { return v[0] >= 37 ? CandidateOutcome::preserved : CandidateOutcome::lost; };
+    std::vector<std::string> plain_sequence, cached_sequence, evicted_sequence;
+    auto plain = scripted_reduction(input, threshold, &plain_sequence, {.enabled = false});
+    auto cached = scripted_reduction(input, threshold, &cached_sequence, {.forced_fingerprint = 0});
+    auto evicted = scripted_reduction(input, threshold, &evicted_sequence, {.max_entries = 1, .forced_fingerprint = 0});
+    REQUIRE(cached.outcome == RunOutcome::completed);
+    REQUIRE(evicted.outcome == RunOutcome::completed);
+    REQUIRE(cached.best->values == Values{37});
+    REQUIRE(evicted.best->normalized_input == plain.best->normalized_input);
+    REQUIRE(cached_sequence == plain_sequence);
+    REQUIRE(evicted_sequence == plain_sequence);
+    REQUIRE(cached.statistics.candidate_evaluations < plain.statistics.candidate_evaluations);
+    REQUIRE(evicted.statistics.candidate_evaluations > cached.statistics.candidate_evaluations);
+}
+TEST_CASE("real compiled programs preserve completed accepted sequences across cache controls", "[reduction][cache][runner]") {
+    auto input = request(); input.input_text = "3 42 7 42"; input.constraints = {0, 3, 0, 42}; input.limits.max_evaluations.reset();
+    input.solution = {SHRINK_PROGRAM_FIXTURE, {"duplicate-bug"}};
+    input.reference = {SHRINK_PROGRAM_FIXTURE, {"text", "ok"}};
+    for (const auto& controls : std::vector<detail::CacheControls>{
+        {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}, {.max_text_bytes = 4}}) {
+        Runner runner;
+        std::vector<std::string> accepted;
+        RunHooks hooks; hooks.notify = [&](const RunEvent& event) {
+            if (event.kind == RunEventKind::acceptance) accepted.push_back(event.best.normalized_input);
+        };
+        auto result = reduce(input, runner, {}, hooks, controls);
+        REQUIRE(result.outcome == RunOutcome::completed);
+        REQUIRE(result.best->values == Values{0, 0});
+        REQUIRE(accepted == std::vector<std::string>{"2\n42 42\n", "2\n0 0\n"});
+        REQUIRE(result.statistics.distinct_inconclusive_candidates == 0);
+    }
 }

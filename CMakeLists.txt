@@ -19,6 +19,7 @@ add_library(shrink_core STATIC
     src/core/input_format.cpp
     src/core/reduction.cpp
     src/core/coordinator.cpp
+    src/core/evaluation_cache.cpp
     src/core/evaluator.cpp
     src/core/runner.cpp
 )

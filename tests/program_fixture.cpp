@@ -20,15 +20,20 @@ int main(int argc, char** argv) {
     if (argc < 2) return 99;
     const std::string mode = argv[1];
     if (mode == "text" && argc == 3) std::cout << argv[2];
-    else if (mode == "duplicate-bug") {
+    else if (mode == "duplicate-bug" || mode == "original-pair-reference") {
         std::size_t length; std::cin >> length;
         std::unordered_set<std::int64_t> seen;
         bool duplicate = false;
+        bool original_pair = length == 2;
         for (std::size_t index = 0; index < length; ++index) {
             std::int64_t value; if (!(std::cin >> value)) return 95;
             if (!seen.insert(value).second) duplicate = true;
+            if (value != 5) original_pair = false;
         }
-        std::cout << (duplicate ? "duplicate" : "ok");
+        if (mode == "original-pair-reference") {
+            if (!original_pair) return 7;
+            std::cout << "2";
+        } else std::cout << (duplicate ? "duplicate" : "ok");
     }
     else if (mode == "slow-text" && argc == 4) {
         usleep(static_cast<useconds_t>(std::stoul(argv[2]) * 1000));

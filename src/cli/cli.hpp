@@ -9,6 +9,7 @@ namespace shrink::cli {
 // Internal invocation seam. Hosts supplying a runner retain it through pending
 // cleanup. The terminal entry point owns its runner until process exit.
 struct InvocationServices {
+    detail::CacheControls cache;
     Runner* runner = nullptr;
     CancellationToken cancellation;
     std::function<SaveResult(const std::filesystem::path&, const SaveRequest&)> save;

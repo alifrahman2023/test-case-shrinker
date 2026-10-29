@@ -63,7 +63,7 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
                << "; best length " << event.best.values.size()
                << "; elapsed " << event.statistics.elapsed_ms << " ms\n";
     };
-    auto result = reduce(std::move(invocation.core.request), runner, services.cancellation, hooks);
+    auto result = reduce(std::move(invocation.core.request), runner, services.cancellation, hooks, services.cache);
     // The terminal adapter returns to main and exits after reporting unresolved
     // ownership. Keep that runner alive until process exit rather than invoking
     // its destructor contract check. Continuing hosts supply their own runner.

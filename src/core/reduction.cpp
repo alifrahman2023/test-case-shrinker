@@ -1,4 +1,5 @@
 #include "reduction.hpp"
+#include "evaluation_cache.hpp"
 #include <algorithm>
 #include <unordered_set>
 #include <unordered_map>
@@ -14,7 +15,7 @@ bool simpler(std::int64_t value, std::int64_t prior) {
     return magnitude(value) < magnitude(prior) || (magnitude(value) == magnitude(prior) && value > prior);
 }
 }
-ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationToken cancellation, const RunHooks& hooks) {
+ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationToken cancellation, const RunHooks& hooks, const detail::CacheControls& cache_controls) {
     ReductionResult result;
     result.saving.configured = static_cast<bool>(hooks.save);
     auto prepared = prepare_request(std::move(request));
@@ -103,6 +104,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
         }
         else {
             bool stopped = false;
+            detail::EvaluationCache cache(cache_controls);
             std::unordered_set<std::string> inconclusive;
             auto between_evaluations = [&] {
                 if (observe_stops() || !result.errors.empty()) return true;
@@ -148,8 +150,17 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                 }
                 if (!smaller) return false;
                 if (observe_stops()) { stopped = true; return false; }
-                if (result.observed_reasons.evaluation_limit) { stopped = true; return false; }
                 auto text = std::to_string(values.size()) + '\n' + body + '\n';
+                const auto cached = cache.find(text, execution_cancellation);
+                if (observe_stops()) { stopped = true; return false; }
+                if (cached) {
+                    if (*cached == CandidateOutcome::inconclusive) {
+                        inconclusive.insert(std::move(text));
+                        result.statistics.distinct_inconclusive_candidates = inconclusive.size();
+                    }
+                    return false;
+                }
+                if (result.observed_reasons.evaluation_limit) { stopped = true; return false; }
                 auto candidate = std::make_shared<Evaluation>(evaluate_candidate(runner, text,
                     input.request.solution, input.request.reference, input.request.limits, execution_cancellation));
                 if (candidate->execution.programs.solution.launched || candidate->execution.programs.reference.launched)
@@ -166,6 +177,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                     if (observe_stops() || !result.errors.empty()) stopped = true;
                     return true;
                 }
+                cache.remember(text, *candidate->outcome, execution_cancellation);
                 if (candidate->outcome == CandidateOutcome::lost) ++result.statistics.lost_executions;
                 else {
                     ++result.statistics.inconclusive_executions;

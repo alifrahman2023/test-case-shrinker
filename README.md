@@ -38,6 +38,22 @@ Without an overall budget, search continues until completion, cancellation, or
 operational error, assuming terminating candidate processing and executions; no
 practical total-runtime bound is promised.
 
+Each invocation caches only ordinary lost/inconclusive candidate outcomes in
+memory. Fingerprints index candidates, but exact normalized text decides reuse,
+so collisions cannot skip preserving candidates. Accepted inputs, operational
+errors and unfinished evaluations are never cached. FIFO eviction bounds retained
+candidate text to 8 MiB and entries to 4,096; oversized candidates execute without
+being cached. The cache retains no execution history and does not persist across
+invocations or resume.
+
+Cache hits and invalid candidates consume no evaluation budget. Actual execution
+counts remain separate from distinct inconclusive texts in the current/final
+round, including cached outcomes. Completed runs with caching disabled or entries
+evicted retain the same result and accepted-input sequence; budget-limited runs
+can stop at different inputs because they perform different amounts of work.
+Cache disable/size/fingerprint controls are internal test controls; there is no
+public cache flag.
+
 The supported baseline is macOS 15 on Apple Silicon (ARM64), using Apple Clang
 and C++20. Newer macOS versions are not rejected. Development requires Apple's
 Command Line Tools (`xcode-select --install`) and CMake 3.24 or newer.

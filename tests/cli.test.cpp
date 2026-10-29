@@ -747,3 +747,46 @@ TEST_CASE("CLI simplifies duplicate failures and retains completed guarantee whe
         REQUIRE(workspace.read("result.txt") == (fail_final ? "3\n42 7 42\n" : "2\n0 0\n"));
     }
 }
+TEST_CASE("CLI completed cache modes preserve real-program result and counts without a cache flag", "[cli-cache]") {
+    Workspace workspace;
+    workspace.write("original input.txt", "3 42 7 42");
+    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"});
+    arguments.erase(arguments.begin() + 16);
+    std::uint64_t uncached_evaluations = 0;
+    for (const auto& cache : std::vector<shrink::detail::CacheControls>{
+        {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}, {.max_text_bytes = 4}}) {
+        shrink::cli::InvocationServices services; services.cache = cache;
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 0);
+        REQUIRE(output.str().empty());
+        REQUIRE(workspace.read("result.txt") == "2\n0 0\n");
+        REQUIRE(errors.str().find("Complete final round; distinct inconclusive candidates: 0") != std::string::npos);
+        REQUIRE(errors.str().find("acceptances: 2") != std::string::npos);
+        REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+        const std::string label = "candidate evaluations: ";
+        auto marker = errors.str().find(label); REQUIRE(marker != std::string::npos);
+        const auto evaluations = std::stoull(errors.str().substr(marker + label.size()));
+        if (!cache.enabled) uncached_evaluations = evaluations;
+        else REQUIRE(evaluations <= uncached_evaluations);
+    }
+    arguments.push_back("--cache=false");
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 2);
+}
+TEST_CASE("CLI cached inconclusive checks retain exact uncertainty counts with fewer executions", "[cli-cache]") {
+    Workspace workspace;
+    workspace.write("original input.txt", "2 5 5");
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"original-pair-reference"});
+    arguments.erase(arguments.begin() + 16);
+    for (const auto& cache : std::vector<shrink::detail::CacheControls>{
+        {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}}) {
+        shrink::cli::InvocationServices services; services.cache = cache;
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 0);
+        REQUIRE(workspace.read("result.txt") == "2\n5 5\n");
+        REQUIRE(output.str().empty());
+        REQUIRE(errors.str().find("Complete final round; distinct inconclusive candidates: 7") != std::string::npos);
+        REQUIRE(errors.str().find(cache.enabled ? "candidate evaluations: 7; acceptances: 0" : "candidate evaluations: 8; acceptances: 0") != std::string::npos);
+        REQUIRE(errors.str().find(cache.enabled ? "inconclusive executions: 7" : "inconclusive executions: 8") != std::string::npos);
+    }
+}

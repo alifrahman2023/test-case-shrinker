@@ -1,6 +1,7 @@
 #pragma once
 
 #include "evaluator.hpp"
+#include "cache_controls.hpp"
 #include <functional>
 #include <system_error>
 
@@ -87,5 +88,5 @@ struct ReductionResult {
     std::vector<PendingOwnership> pending_ownership;
 };
 ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationToken cancellation = {},
-                       const RunHooks& hooks = {});
+                       const RunHooks& hooks = {}, const detail::CacheControls& cache = {});
 }
