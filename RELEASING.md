@@ -72,7 +72,7 @@ against these existing checks:
 | Exceptional cleanup, retained ownership, recovery and destructor/lifetime contract | Scripted execution-event tests |
 | Owning core results, callback exceptions and save/notification hooks | Reduction lifecycle tests |
 
-The [README](README.md) states the exact local guarantee and repeatability
+The [technical reference](REFERENCE.md) states the exact local guarantee and repeatability
 exclusions, supplied-program prerequisites, sleep-inclusive limits and cleanup
 bounds, callback/runner lifetime rules, last-successful-checkpoint recovery and
 lack of fsync/power-loss durability. The [installation instructions](INSTALL.md)

@@ -59,7 +59,7 @@ determinism requirement. You supply a correct reference and sufficient declared
 input constraints. Programs run with your permissions and inherited environment;
 execution is not sandboxed.
 
-See the [README](README.md) for the exact local irreducibility guarantee,
+See the [technical reference](REFERENCE.md) for the exact local irreducibility guarantee,
 repeatability exclusions, sleep-inclusive limits, bounded cleanup, checkpoint
 recovery, and internal callback/runner lifetime rules. See the
 [demonstrations](examples/README.md) for complete real-program invocations.
