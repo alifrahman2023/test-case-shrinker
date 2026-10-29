@@ -1,6 +1,9 @@
 # shrink
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
+For two complete runnable examples, see [the demonstrations](examples/README.md):
+a duplicate-handling bug and an arithmetic-width bug with defined unsigned wrap.
+
 The search verifies a normalized wrong-answer baseline, then repeats contiguous-
 chunk removal, simplification of each distinct value everywhere, and individual
 simplification of repeated values. A full round with no acceptance establishes

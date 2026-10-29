@@ -39,3 +39,15 @@ jobs:
           -DSHRINK_EXECUTABLE="$RUNNER_TEMP/shrink-install/bin/shrink"
           -DCHECK_DIRECTORY="$RUNNER_TEMP/shrink-installed-check"
           -P tests/check_information.cmake
+      - name: Run demonstrations with installed Release
+        run: |
+          for demo in duplicates width; do
+            cmake \
+              -DDEMO="$demo" \
+              -DSHRINK_EXECUTABLE="$RUNNER_TEMP/shrink-install/bin/shrink" \
+              -DDEMO_DIRECTORY="$GITHUB_WORKSPACE/examples/$demo" \
+              -DSOLUTION="$GITHUB_WORKSPACE/build/debug/demo_${demo}_solution" \
+              -DREFERENCE="$GITHUB_WORKSPACE/build/debug/demo_${demo}_reference" \
+              -DCHECK_DIRECTORY="$RUNNER_TEMP/shrink-demo-$demo" \
+              -P tests/check_demonstration.cmake
+          done

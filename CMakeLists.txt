@@ -64,4 +64,31 @@ if(BUILD_TESTING)
             "-DSHRINK_EXECUTABLE=$<TARGET_FILE:shrink>"
             "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-check"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_information.cmake")
+
+    foreach(role IN ITEMS solution reference)
+        foreach(demo IN ITEMS duplicates width)
+            add_executable(demo_${demo}_${role} examples/${demo}/${role}.cpp)
+            target_compile_options(demo_${demo}_${role} PRIVATE -Wall -Wextra -Wpedantic)
+        endforeach()
+    endforeach()
+    add_test(NAME demo_duplicates
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDEMO=duplicates"
+            "-DSHRINK_EXECUTABLE=$<TARGET_FILE:shrink>"
+            "-DDEMO_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/examples/duplicates"
+            "-DSOLUTION=$<TARGET_FILE:demo_duplicates_solution>"
+            "-DREFERENCE=$<TARGET_FILE:demo_duplicates_reference>"
+            "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/demo-duplicates-check"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_demonstration.cmake")
+    set_tests_properties(demo_duplicates PROPERTIES TIMEOUT 30)
+    add_test(NAME demo_width
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDEMO=width"
+            "-DSHRINK_EXECUTABLE=$<TARGET_FILE:shrink>"
+            "-DDEMO_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}/examples/width"
+            "-DSOLUTION=$<TARGET_FILE:demo_width_solution>"
+            "-DREFERENCE=$<TARGET_FILE:demo_width_reference>"
+            "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/demo-width-check"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_demonstration.cmake")
+    set_tests_properties(demo_width PROPERTIES TIMEOUT 30)
 endif()
