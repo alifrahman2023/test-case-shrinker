@@ -18,6 +18,15 @@ int main(int argc, char** argv) {
     if (argc < 2) return 99;
     const std::string mode = argv[1];
     if (mode == "text" && argc == 3) std::cout << argv[2];
+    else if (mode == "record-input" && argc == 4) {
+        std::ofstream record(argv[2], std::ios::binary | std::ios::app);
+        record << std::cin.rdbuf();
+        if (!record) return 96;
+        std::cout << argv[3];
+    }
+    else if (mode == "fail-stderr" && (argc == 3 || argc == 4)) {
+        emit(std::cerr, std::stoull(argv[2]), argc == 4 ? static_cast<char>(std::stoi(argv[3])) : 'e'); return 7;
+    }
     else if (mode == "emit" && argc == 4) {
         emit(std::cout, std::stoull(argv[2]), 'x');
         emit(std::cerr, std::stoull(argv[3]), 'e');
@@ -31,8 +40,13 @@ int main(int argc, char** argv) {
         signal(SIGINT, SIG_IGN);
         { std::ofstream ready(argv[2]); ready << "ready"; }
         for (;;) pause();
-    } else if (mode == "rendezvous" && argc == 4) {
-        { std::ofstream ready(argv[2]); ready << "ready"; }
+    } else if ((mode == "rendezvous" || mode == "rendezvous-ignore-interrupt") && argc == 4) {
+        if (mode == "rendezvous-ignore-interrupt") signal(SIGINT, SIG_IGN);
+        sigset_t mask; sigprocmask(SIG_SETMASK, nullptr, &mask);
+        struct sigaction action{}; sigaction(SIGINT, nullptr, &action);
+        { std::ofstream ready(argv[2]);
+          ready << getpid() << ' ' << getpgrp() << ' ' << sigismember(&mask, SIGINT)
+                << ' ' << (action.sa_handler == SIG_DFL); }
         for (int i = 0; i < 5000 && !std::filesystem::exists(argv[3]); ++i) usleep(1000);
         if (!std::filesystem::exists(argv[3])) return 97;
         std::cout << "met";

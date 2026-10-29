@@ -1,4 +1,5 @@
 #include "cli.hpp"
+#include "saving.hpp"
 #include "options.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -15,6 +16,8 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <thread>
+#include <signal.h>
 #include <vector>
 
 extern char** environ;
@@ -386,4 +389,254 @@ TEST_CASE("CLI leaves an existing default output unchanged on rejection", "[cli]
     arguments.resize(arguments.size() - 2);
     workspace.reject(arguments);
     REQUIRE(workspace.read("reduced.txt") == "previous default result\n");
+}
+
+namespace {
+std::vector<std::string> fixture_arguments(const Workspace& workspace, const std::vector<std::string>& solution,
+                                          const std::vector<std::string>& reference) {
+    auto arguments = workspace.arguments();
+    arguments[3] = SHRINK_PROGRAM_FIXTURE; arguments[5] = SHRINK_PROGRAM_FIXTURE;
+    arguments.push_back("--max-evaluations=0");
+    for (const auto& argument : solution) arguments.push_back("--solution-arg=" + argument);
+    for (const auto& argument : reference) arguments.push_back("--reference-arg=" + argument);
+    return arguments;
+}
+}
+TEST_CASE("CLI verifies and replaces a zero-budget baseline with exact-token evidence", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "1.0"});
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(output.str().empty());
+    REQUIRE(workspace.read("result.txt") == "3\n7 -2 7\n");
+    REQUIRE(errors.str().find("Baseline: both programs succeeded; first differing token: 1") != std::string::npos);
+    REQUIRE(errors.str().find("Final: both programs succeeded; first differing token: 1") != std::string::npos);
+    REQUIRE(errors.str().find("\"1.0\"") != std::string::npos);
+    REQUIRE(errors.str().find("No reduction round began") != std::string::npos);
+    REQUIRE(errors.str().find("evaluation limit") != std::string::npos);
+}
+TEST_CASE("CLI final-save failure emits complete normalized recovery and reports file context", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"});
+    shrink::cli::InvocationServices services;
+    unsigned calls = 0;
+    services.save = [&](const fs::path& path, const shrink::SaveRequest&) -> shrink::SaveResult {
+        ++calls;
+        return shrink::SaveError{shrink::SaveErrorCode::replace, "replace result", path,
+                                 std::make_error_code(std::errc::permission_denied)};
+    };
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 1);
+    REQUIRE(calls == 2);
+    REQUIRE(output.str() == "3\n7 -2 7\n");
+    REQUIRE(workspace.read("result.txt") == "previous result\n");
+    REQUIRE(errors.str().find("result.txt") != std::string::npos);
+    REQUIRE(errors.str().find("Permission denied") != std::string::npos);
+    REQUIRE(errors.str().find("Final save: failed") != std::string::npos);
+}
+
+TEST_CASE("CLI explains unsuccessful solution and reference baseline executions", "[cli-baseline]") {
+    Workspace workspace;
+    for (const auto& [solution, reference, fact] : std::vector<std::tuple<std::vector<std::string>, std::vector<std::string>, std::string>>{
+        {{"exit", "7"}, {"text", "2"}, "solution: exit 7"},
+        {{"exit", "127"}, {"text", "2"}, "solution: exit 127"},
+        {{"text", "1"}, {"exit", "127"}, "reference: exit 127"},
+        {{"signal", "15"}, {"text", "2"}, "signal 15"},
+        {{"emit", "8388609", "0"}, {"text", "2"}, "stdout overflow"}}) {
+        auto arguments = fixture_arguments(workspace, solution, reference);
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 3);
+        REQUIRE(output.str().empty());
+        REQUIRE(errors.str().find(fact) != std::string::npos);
+        REQUIRE(errors.str().find("No verified result") != std::string::npos);
+        REQUIRE(workspace.read("result.txt") == "previous result\n");
+    }
+}
+TEST_CASE("CLI bounds escaped unsuccessful stderr and distinguishes retention truncation", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"fail-stderr", "70000"}, {"text", "2"});
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 3);
+    REQUIRE(errors.str().find(std::string(4096, 'e')) != std::string::npos);
+    REQUIRE(errors.str().find(std::string(4097, 'e')) == std::string::npos);
+    REQUIRE(errors.str().find("presentation truncated") != std::string::npos);
+    REQUIRE(errors.str().find("retention truncated at 64 KiB") != std::string::npos);
+}
+TEST_CASE("CLI runs only the normalized baseline once and resume verifies it afresh", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"});
+    arguments.push_back("--quiet");
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(output.str().empty());
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n");
+    REQUIRE(workspace.read("reference-input") == "3\n7 -2 7\n");
+    REQUIRE(errors.str().find("Baseline:") != std::string::npos);
+    REQUIRE(errors.str().find("Final:") != std::string::npos);
+    arguments[1] = "result.txt";
+    arguments[15] = "resumed.txt";
+    std::ostringstream resumed_output, resumed_errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), resumed_output, resumed_errors) == 4);
+    REQUIRE(workspace.read("resumed.txt") == "3\n7 -2 7\n");
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n3\n7 -2 7\n");
+    REQUIRE(workspace.read("reference-input") == "3\n7 -2 7\n3\n7 -2 7\n");
+    arguments[15] = "result.txt";
+    std::ostringstream alias_output, alias_errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), alias_output, alias_errors) == 2);
+}
+TEST_CASE("CLI Ctrl-C stops baseline children without publishing unverified input", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"rendezvous", "ready", "missing-peer"}, {"rendezvous", "reference-ready", "missing-peer"});
+    std::vector<std::string> owned{SHRINK_CLI_PATH}; owned.insert(owned.end(), arguments.begin(), arguments.end());
+    std::vector<char*> argv; for (auto& argument : owned) argv.push_back(argument.data()); argv.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    REQUIRE(posix_spawn_file_actions_init(&actions) == 0);
+    REQUIRE(posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "stdout.txt", O_CREAT | O_TRUNC | O_WRONLY, 0600) == 0);
+    REQUIRE(posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "stderr.txt", O_CREAT | O_TRUNC | O_WRONLY, 0600) == 0);
+    pid_t child;
+    const int launched = posix_spawn(&child, SHRINK_CLI_PATH, &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    REQUIRE(launched == 0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fs::exists("ready") && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool ready = fs::exists("ready");
+    kill(child, ready ? SIGINT : SIGKILL);
+    int status = 0;
+    pid_t waited = 0;
+    const auto stop_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while ((waited = waitpid(child, &status, WNOHANG)) == 0 && std::chrono::steady_clock::now() < stop_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (waited == 0) { kill(child, SIGKILL); waitpid(child, &status, 0); }
+    REQUIRE(ready);
+    REQUIRE(waited == child);
+    REQUIRE(WIFEXITED(status));
+    REQUIRE(WEXITSTATUS(status) == 130);
+    REQUIRE(workspace.read("stdout.txt").empty());
+    REQUIRE(workspace.read("result.txt") == "previous result\n");
+    REQUIRE(workspace.read("stderr.txt").find("caller cancellation") != std::string::npos);
+}
+TEST_CASE("CLI stdout recovery failure remains an operational error", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"});
+    shrink::cli::InvocationServices services;
+    services.save = [](const fs::path& path, const shrink::SaveRequest&) -> shrink::SaveResult {
+        return shrink::SaveError{shrink::SaveErrorCode::write_temporary, "write temporary result", path,
+                                 std::make_error_code(std::errc::no_space_on_device)};
+    };
+    for (bool throws : {false, true}) {
+        std::ostringstream output, errors;
+        output.setstate(std::ios::badbit);
+        if (throws) { try { output.exceptions(std::ios::badbit); } catch (...) {} }
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 1);
+        REQUIRE(errors.str().find("stdout recovery failed") != std::string::npos);
+        REQUIRE(errors.str().find("write temporary result") != std::string::npos);
+        REQUIRE(workspace.read("result.txt") == "previous result\n");
+    }
+}
+TEST_CASE("CLI retains an initial saving error even after successful final replacement", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"});
+    shrink::cli::InvocationServices services;
+    std::vector<shrink::SaveKind> saves;
+    services.save = [&](const fs::path& path, const shrink::SaveRequest& save) -> shrink::SaveResult {
+        saves.push_back(save.kind);
+        if (save.kind == shrink::SaveKind::initial)
+            return shrink::SaveError{shrink::SaveErrorCode::write_temporary, "write temporary result", path,
+                                     std::make_error_code(std::errc::no_space_on_device)};
+        return shrink::cli::save_atomic(path, save);
+    };
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 1);
+    REQUIRE(saves == std::vector{shrink::SaveKind::initial, shrink::SaveKind::final});
+    REQUIRE(workspace.read("result.txt") == "3\n7 -2 7\n");
+    REQUIRE(output.str().empty());
+    REQUIRE(errors.str().find("Final save: succeeded") != std::string::npos);
+    REQUIRE(errors.str().find("Save error (initial)") != std::string::npos);
+}
+TEST_CASE("CLI default output is replaced only for a verified baseline", "[cli-baseline]") {
+    Workspace workspace;
+    workspace.write("reduced.txt", "previous default\n");
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "1.0"});
+    arguments.erase(arguments.begin() + 14, arguments.begin() + 16);
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(workspace.read("reduced.txt") == "3\n7 -2 7\n");
+    // A saved default input cannot resume to the same default destination.
+    arguments[1] = "reduced.txt";
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 2);
+}
+TEST_CASE("CLI agreement leaves an existing output unchanged and a missing output absent", "[cli-baseline]") {
+    Workspace workspace;
+    for (bool existing : {true, false}) {
+        auto arguments = fixture_arguments(workspace, {"text", "1 \t2\n"}, {"text", "1\n2 "});
+        if (!existing) arguments[15] = "new-result";
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 3);
+        REQUIRE(output.str().empty());
+        REQUIRE(errors.str().find("No wrong-answer disagreement found for this input.") != std::string::npos);
+        REQUIRE(errors.str().find(existing ? "was left unchanged" : "was not created") != std::string::npos);
+        REQUIRE(workspace.read("result.txt") == "previous result\n");
+        REQUIRE_FALSE(fs::exists("new-result"));
+    }
+}
+TEST_CASE("CLI token previews escape bytes, mark truncation, and expose end of output", "[cli-baseline]") {
+    Workspace workspace;
+    for (const auto& [solution, reference, preview] : std::vector<std::tuple<std::string, std::string, std::string>>{
+        {"same \x01\"\\", "same other", "\\x01\\\"\\\\"},
+        {"same", "same more", "end of output"},
+        {std::string(100, 'x'), "different", "[presentation truncated]"}}) {
+        auto arguments = fixture_arguments(workspace, {"text", solution}, {"text", reference});
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+        REQUIRE(errors.str().find(preview) != std::string::npos);
+        REQUIRE(errors.str().find(std::string(81, 'x')) == std::string::npos);
+        REQUIRE(errors.str().find('\x01') == std::string::npos);
+        REQUIRE(output.str().empty());
+    }
+}
+TEST_CASE("CLI reports timeout, peer stop, overall expiry, and launch errors distinctly", "[cli-baseline]") {
+    Workspace workspace;
+    struct Case {
+        const char* name;
+        std::vector<std::string> solution;
+        std::vector<std::string> reference;
+        std::string limit;
+        int expected_exit;
+        std::vector<std::string> facts;
+        const char* executable = SHRINK_PROGRAM_FIXTURE;
+    };
+    for (const auto& test : std::vector<Case>{
+        {"solution timeout", {"rendezvous", "ready", "missing"}, {"rendezvous", "other-ready", "missing"},
+         "--solution-timeout=100ms", 3, {"timeout", "peer stop"}},
+        {"reference timeout", {"text", "1"}, {"rendezvous", "other-ready", "missing"},
+         "--reference-timeout=100ms", 3, {"unsuccessful reference execution (inconclusive)"}},
+        {"overall expiry", {"rendezvous", "ready", "missing"}, {"rendezvous", "other-ready", "missing"},
+         "--time-limit=100ms", 4, {"overall time limit"}},
+        {"launch failure", {}, {"text", "2"}, "", 1, {"Error:"}, "./missing-program"}}) {
+        INFO(test.name);
+        auto arguments = fixture_arguments(workspace, test.solution, test.reference);
+        arguments[3] = test.executable;
+        if (!test.limit.empty()) arguments.push_back(test.limit);
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == test.expected_exit);
+        REQUIRE(output.str().empty());
+        REQUIRE(workspace.read("result.txt") == "previous result\n");
+        for (const auto& fact : test.facts) REQUIRE(errors.str().find(fact) != std::string::npos);
+    }
+}
+TEST_CASE("CLI caps stderr preview after escaping control bytes", "[cli-baseline]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"fail-stderr", "70000", "1"}, {"text", "2"});
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 3);
+    const auto text = errors.str();
+    const auto begin = text.find("  stderr: \"");
+    REQUIRE(begin != std::string::npos);
+    const auto content = begin + std::string("  stderr: \"").size();
+    const auto end = text.find('"', content);
+    REQUIRE(end != std::string::npos);
+    REQUIRE(end - content <= 4096);
+    REQUIRE(text.find("\\x01") != std::string::npos);
+    REQUIRE(text.find("[presentation truncated]") != std::string::npos);
+    REQUIRE(text.find("retention truncated at 64 KiB") != std::string::npos);
 }
