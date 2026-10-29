@@ -19,16 +19,16 @@ class Script final : public ExecutionBackend {
 public:
     std::uint64_t clock = 100;
     std::deque<Step> steps;
-    std::array<bool, 2> active{};
-    std::array<unsigned, 2> completion_parts{};
-    std::array<bool, 2> uncertain_close{};
+    std::array<bool, program_count> active{};
+    std::array<unsigned, program_count> completion_parts{};
+    std::array<bool, program_count> uncertain_close{};
     std::function<void()> on_clock;
     std::function<void()> after_service;
-    std::array<int, 2> stops{};
-    std::array<std::optional<std::uint64_t>, 2> stopped_at{};
-    std::array<int, 2> launches{};
+    std::array<int, program_count> stops{};
+    std::array<std::optional<std::uint64_t>, program_count> stopped_at{};
+    std::array<int, program_count> launches{};
     std::vector<int> waits;
-    std::array<std::uint64_t, 2> launch_delay{};
+    std::array<std::uint64_t, program_count> launch_delay{};
     std::function<void(ProgramRole)> on_launch;
     std::optional<ProgramRole> fail_launch;
     std::optional<ProgramRole> fail_stop;
@@ -94,11 +94,11 @@ TEST_CASE("deadline covers collection and distinguishes pending setup from execu
         Runner runner(std::move(script));
         RunLimits limits; limits.solution_timeout = std::chrono::milliseconds(10);
         auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
-        REQUIRE_FALSE(result.execution.programs[0].successful());
+        REQUIRE_FALSE(result.execution.programs.solution.successful());
         if (setup_done) {
             REQUIRE(result.execution.errors.empty());
             REQUIRE(result.outcome == CandidateOutcome::lost);
-            REQUIRE(result.execution.programs[0].stop_reasons == std::vector{StopReason::timeout});
+            REQUIRE(result.execution.programs.solution.stop_reasons == std::vector{StopReason::timeout});
         } else {
             REQUIRE_FALSE(result.execution.errors.empty());
             REQUIRE(result.execution.errors[0].code == RunnerErrorCode::launch);
@@ -128,7 +128,7 @@ TEST_CASE("cancellation after only one launch stops that child and does not laun
     REQUIRE_FALSE(result.outcome);
     REQUIRE(observed->launches == std::array{1, 0});
     REQUIRE(observed->stops == std::array{1, 0});
-    REQUIRE(result.execution.programs[0].stop_reasons == std::vector{StopReason::cancellation});
+    REQUIRE(result.execution.programs.solution.stop_reasons == std::vector{StopReason::cancellation});
     REQUIRE_FALSE(runner.has_pending_ownership());
 }
 TEST_CASE("setup includes launch work and expires before launching a peer", "[execution-events]") {
@@ -158,7 +158,7 @@ TEST_CASE("operational errors override ordinary failure and retain cancellation 
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::io);
     REQUIRE(result.execution.errors[0].program == reference);
     REQUIRE_FALSE(result.execution.errors[1].program);
-    REQUIRE(result.execution.programs[0].exit_code == 7);
+    REQUIRE(result.execution.programs.solution.exit_code == 7);
     REQUIRE(observed->stops == std::array{1, 1});
 }
 TEST_CASE("unresolved cleanup has one shared bound and retained ownership blocks new work", "[execution-events]") {
@@ -179,8 +179,8 @@ TEST_CASE("unresolved cleanup has one shared bound and retained ownership blocks
     REQUIRE(pending);
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::cleanup);
-    REQUIRE_FALSE(result.execution.programs[0].cleanup_complete);
-    REQUIRE_FALSE(result.execution.programs[1].cleanup_complete);
+    REQUIRE_FALSE(result.execution.programs.solution.cleanup_complete);
+    REQUIRE_FALSE(result.execution.programs.reference.cleanup_complete);
     REQUIRE(refused.execution.errors[0].code == RunnerErrorCode::pending_ownership);
     REQUIRE(launches == std::array{1, 1});
     REQUIRE(clock == 1100);
@@ -220,7 +220,7 @@ TEST_CASE("late operational errors override an already observed ordinary solutio
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::launch);
     REQUIRE(observed->stops[1] == 1);
-    REQUIRE(result.execution.programs[0].exit_code == 7);
+    REQUIRE(result.execution.programs.solution.exit_code == 7);
 }
 TEST_CASE("sleep-inclusive clock jumps expire work before newly collected completion", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
@@ -231,8 +231,8 @@ TEST_CASE("sleep-inclusive clock jumps expire work before newly collected comple
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == CandidateOutcome::lost);
     REQUIRE(observed->stops == std::array{1, 1});
-    REQUIRE(result.execution.programs[0].stop_reasons[0] == StopReason::timeout);
-    REQUIRE(result.execution.programs[1].stop_reasons[0] == StopReason::timeout);
+    REQUIRE(result.execution.programs.solution.stop_reasons[0] == StopReason::timeout);
+    REQUIRE(result.execution.programs.reference.stop_reasons[0] == StopReason::timeout);
 }
 TEST_CASE("completed reference cleanup does not shorten the solution execution deadline", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
@@ -259,8 +259,8 @@ TEST_CASE("buffered output after exit must complete before wrong-answer acceptan
     REQUIRE(result.outcome == CandidateOutcome::lost);
     REQUIRE(result.execution.errors.empty());
     REQUIRE(observed->steps.empty());
-    REQUIRE(result.execution.programs[0].stdout_bytes == "1.0");
-    REQUIRE(result.execution.programs[0].successful());
+    REQUIRE(result.execution.programs.solution.stdout_bytes == "1.0");
+    REQUIRE(result.execution.programs.solution.successful());
 }
 TEST_CASE("output collection remains deadline-bound after a zero exit", "[execution-events]") {
     auto script = std::make_unique<Script>();
@@ -273,8 +273,8 @@ TEST_CASE("output collection remains deadline-bound after a zero exit", "[execut
     auto result = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, limits);
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == CandidateOutcome::lost);
-    REQUIRE(result.execution.programs[0].exit_code == 0);
-    REQUIRE(result.execution.programs[0].stop_reasons == std::vector{StopReason::timeout});
+    REQUIRE(result.execution.programs.solution.exit_code == 0);
+    REQUIRE(result.execution.programs.solution.stop_reasons == std::vector{StopReason::timeout});
 }
 TEST_CASE("cancellation arriving after collection prevents output classification", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
@@ -311,8 +311,8 @@ TEST_CASE("uncertain descriptor release retains ownership despite reaped zero ex
     REQUIRE(pending);
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::cleanup);
-    REQUIRE(result.execution.programs[0].reaped);
-    REQUIRE_FALSE(result.execution.programs[0].cleanup_complete);
+    REQUIRE(result.execution.programs.solution.reaped);
+    REQUIRE_FALSE(result.execution.programs.solution.cleanup_complete);
     REQUIRE(refused.execution.errors[0].code == RunnerErrorCode::pending_ownership);
     REQUIRE(observed->launches == std::array{1, 1});
 }
@@ -327,7 +327,7 @@ TEST_CASE("failed solution stops the reference before solution output EOF", "[ex
     REQUIRE(result.outcome == CandidateOutcome::lost);
     REQUIRE(observed->stopped_at[1] == 100);
     REQUIRE(observed->stops[0] == 0);
-    REQUIRE(result.execution.programs[0].output_complete);
+    REQUIRE(result.execution.programs.solution.output_complete);
 }
 TEST_CASE("unexpected status errors retain children through termination and reaping", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
@@ -339,8 +339,8 @@ TEST_CASE("unexpected status errors retain children through termination and reap
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.errors[0].code == RunnerErrorCode::status);
     REQUIRE(observed->stops == std::array{1, 1});
-    REQUIRE(result.execution.programs[0].reaped);
-    REQUIRE(result.execution.programs[1].reaped);
+    REQUIRE(result.execution.programs.solution.reaped);
+    REQUIRE(result.execution.programs.reference.reaped);
     REQUIRE_FALSE(runner.has_pending_ownership());
 }
 TEST_CASE("bounded recovery resolves retained children without changing the original error", "[execution-events]") {
@@ -358,21 +358,21 @@ TEST_CASE("bounded recovery resolves retained children without changing the orig
     REQUIRE(pending[1].program == reference);
     REQUIRE(recovered.resolved);
     REQUIRE(recovered.errors.empty());
-    REQUIRE(recovered.execution.programs[0].reaped);
-    REQUIRE(recovered.execution.programs[1].cleanup_complete);
+    REQUIRE(recovered.execution.programs.solution.reaped);
+    REQUIRE(recovered.execution.programs.reference.cleanup_complete);
     REQUIRE_FALSE(runner.has_pending_ownership());
     REQUIRE_FALSE(original.outcome);
     REQUIRE(original.execution.errors[0].code == RunnerErrorCode::cleanup);
-    REQUIRE_FALSE(original.execution.programs[0].cleanup_complete);
+    REQUIRE_FALSE(original.execution.programs.solution.cleanup_complete);
     REQUIRE(recovered.execution.errors[0].code == RunnerErrorCode::cleanup);
-    REQUIRE(recovered.execution.programs[0].stdout_bytes == "retained");
+    REQUIRE(recovered.execution.programs.solution.stdout_bytes == "retained");
     REQUIRE(observed->launches == std::array{1, 1});
     observed->on_launch = {};
     observed->steps = {{0, completion(solution, 0)}, {0, completion(reference, 0)}};
     auto next = evaluate_candidate(runner, "0\n\n", {"/s", {}}, {"/r", {}}, {});
     REQUIRE(next.outcome == CandidateOutcome::lost);
-    REQUIRE(original.execution.programs[0].stdout_bytes == "retained");
-    REQUIRE(recovered.execution.programs[0].stdout_bytes == "retained");
+    REQUIRE(original.execution.programs.solution.stdout_bytes == "retained");
+    REQUIRE(recovered.execution.programs.solution.stdout_bytes == "retained");
 }
 TEST_CASE("each recovery attempt shares its bound and leaves unresolved ownership inspectable", "[execution-events]") {
     auto script = std::make_unique<Script>(); auto* observed = script.get();
@@ -437,7 +437,7 @@ TEST_CASE("recovery can resolve descriptor ownership after reaping without relau
     REQUIRE(pending[0].uncertain_descriptors == 1);
     REQUIRE(recovered.resolved);
     REQUIRE(recovered.errors.empty());
-    REQUIRE(recovered.execution.programs[0].reaped);
+    REQUIRE(recovered.execution.programs.solution.reaped);
     REQUIRE(original.errors[0].system_error == EINTR);
     REQUIRE(observed->launches == std::array{1, 1});
 }
@@ -549,7 +549,7 @@ TEST_CASE("failed recovery termination can be retried without erasing either err
     REQUIRE(recovered.errors.empty());
     REQUIRE(recovered.execution.errors[0].system_error == EPERM);
     REQUIRE(original.errors[0].system_error == EPERM);
-    REQUIRE_FALSE(original.programs[0].cleanup_complete);
-    REQUIRE_FALSE(failed.execution.programs[0].cleanup_complete);
+    REQUIRE_FALSE(original.programs.solution.cleanup_complete);
+    REQUIRE_FALSE(failed.execution.programs.solution.cleanup_complete);
     REQUIRE(observed->launches == std::array{1, 1});
 }

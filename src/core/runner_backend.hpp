@@ -4,7 +4,6 @@
 #include "runner.hpp"
 
 namespace shrink::detail {
-inline constexpr std::array program_roles{ProgramRole::solution, ProgramRole::reference};
 constexpr std::size_t program_index(ProgramRole program) { return static_cast<std::size_t>(program); }
 
 enum class EventKind { setup_complete, stdout_data, stderr_data, stdout_closed,

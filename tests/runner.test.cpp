@@ -57,25 +57,25 @@ TEST_CASE("candidate preserves exact token disagreement with owning evidence", "
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == shrink::CandidateOutcome::preserved);
     REQUIRE(result.disagreement->token_position == 1);
-    REQUIRE(result.execution.programs[0].stdout_bytes == "1");
-    REQUIRE(result.execution.programs[1].stdout_bytes == "1.0");
+    REQUIRE(result.execution.programs.solution.stdout_bytes == "1");
+    REQUIRE(result.execution.programs.reference.stdout_bytes == "1.0");
     REQUIRE_FALSE(runner.has_pending_ownership());
     auto next = shrink::evaluate_candidate(runner, "0\n\n", text("\t 1\n2 "), text("1 2"), {});
     REQUIRE(next.outcome == shrink::CandidateOutcome::lost);
-    REQUIRE(result.execution.programs[1].stdout_bytes == "1.0");
+    REQUIRE(result.execution.programs.reference.stdout_bytes == "1.0");
 }
 TEST_CASE("stdout permits exactly eight MiB and rejects the first additional byte", "[runner]") {
     shrink::Runner runner;
     const auto emit = [](std::string size) { return shrink::ProgramSpec{SHRINK_PROGRAM_FIXTURE, {"emit", size, "0"}}; };
     auto exact = shrink::evaluate_candidate(runner, "0\n\n", emit("8388608"), emit("8388608"), {});
     REQUIRE(exact.outcome == shrink::CandidateOutcome::lost);
-    REQUIRE(exact.execution.programs[0].successful());
-    REQUIRE(exact.execution.programs[0].stdout_bytes.size() == 8'388'608);
+    REQUIRE(exact.execution.programs.solution.successful());
+    REQUIRE(exact.execution.programs.solution.stdout_bytes.size() == 8'388'608);
     auto over = shrink::evaluate_candidate(runner, "0\n\n", emit("8388609"), text("answer"), {});
     REQUIRE(over.outcome == shrink::CandidateOutcome::lost);
-    REQUIRE_FALSE(over.execution.programs[0].successful());
-    REQUIRE(over.execution.programs[0].stdout_bytes.size() == 8'388'608);
-    REQUIRE(over.execution.programs[0].stop_reasons == std::vector{shrink::StopReason::stdout_overflow});
+    REQUIRE_FALSE(over.execution.programs.solution.successful());
+    REQUIRE(over.execution.programs.solution.stdout_bytes.size() == 8'388'608);
+    REQUIRE(over.execution.programs.solution.stop_reasons == std::vector{shrink::StopReason::stdout_overflow});
 }
 TEST_CASE("concurrent large input and output drain fairly while stderr retains only its prefix", "[runner]") {
     shrink::Runner runner;
@@ -84,7 +84,8 @@ TEST_CASE("concurrent large input and output drain fairly while stderr retains o
     auto result = shrink::evaluate_candidate(runner, input, program, program, {});
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == shrink::CandidateOutcome::lost);
-    for (const auto& evidence : result.execution.programs) {
+    for (const auto role : shrink::detail::program_roles) {
+        const auto& evidence = result.execution.programs.for_role(role);
         REQUIRE(evidence.successful());
         REQUIRE(evidence.stdout_bytes == std::string(1'048'576, 'x') + input);
         REQUIRE(evidence.stderr_bytes == std::string(65'536, 'e'));
@@ -95,7 +96,8 @@ TEST_CASE("completed evaluations expose reaped direct children", "[runner]") {
     shrink::Runner runner;
     auto result = shrink::evaluate_candidate(runner, "0\n\n", text("a"), text("b"), {});
     REQUIRE(result.outcome == shrink::CandidateOutcome::preserved);
-    for (const auto& evidence : result.execution.programs) {
+    for (const auto role : shrink::detail::program_roles) {
+        const auto& evidence = result.execution.programs.for_role(role);
         REQUIRE(evidence.process_id.has_value());
         int status = 0;
         errno = 0;
@@ -111,7 +113,7 @@ TEST_CASE("real exit 127 and signal facts remain distinct from exec failure", "[
         {SHRINK_PROGRAM_FIXTURE, {"exit", "127"}}, {});
     REQUIRE(ordinary.execution.errors.empty());
     REQUIRE(ordinary.outcome == shrink::CandidateOutcome::inconclusive);
-    REQUIRE(ordinary.execution.programs[1].exit_code == 127);
+    REQUIRE(ordinary.execution.programs.reference.exit_code == 127);
     auto missing = shrink::evaluate_candidate(runner, "0\n\n", text("1"),
         {"/nonexistent/shrink-test-program", {}}, {});
     REQUIRE_FALSE(missing.outcome);
@@ -123,8 +125,8 @@ TEST_CASE("real exit 127 and signal facts remain distinct from exec failure", "[
         {SHRINK_PROGRAM_FIXTURE, {"signal", std::to_string(SIGTERM)}}, text("1"), {});
     REQUIRE(signalled.outcome == shrink::CandidateOutcome::lost);
     REQUIRE(signalled.execution.errors.empty());
-    REQUIRE(signalled.execution.programs[0].signal == SIGTERM);
-    REQUIRE(signalled.execution.programs[0].stop_reasons.empty());
+    REQUIRE(signalled.execution.programs.solution.signal == SIGTERM);
+    REQUIRE(signalled.execution.programs.solution.stop_reasons.empty());
 }
 TEST_CASE("both programs launch before either must finish", "[runner]") {
     Workspace workspace;
@@ -136,8 +138,8 @@ TEST_CASE("both programs launch before either must finish", "[runner]") {
         {SHRINK_PROGRAM_FIXTURE, {"rendezvous", b, a}}, {});
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == shrink::CandidateOutcome::lost);
-    REQUIRE(result.execution.programs[0].successful());
-    REQUIRE(result.execution.programs[1].successful());
+    REQUIRE(result.execution.programs.solution.successful());
+    REQUIRE(result.execution.programs.reference.successful());
 }
 TEST_CASE("token cancellation kills and reaps programs that ignore ordinary interrupts", "[runner]") {
     Workspace workspace;
@@ -160,7 +162,8 @@ TEST_CASE("token cancellation kills and reaps programs that ignore ordinary inte
     REQUIRE(result.execution.cancelled);
     REQUIRE(result.execution.errors.empty());
     REQUIRE_FALSE(result.outcome);
-    for (const auto& evidence : result.execution.programs) {
+    for (const auto role : shrink::detail::program_roles) {
+        const auto& evidence = result.execution.programs.for_role(role);
         REQUIRE(evidence.signal == SIGKILL);
         REQUIRE(evidence.stop_reasons == std::vector{shrink::StopReason::cancellation});
         REQUIRE(evidence.reaped);
@@ -177,12 +180,12 @@ TEST_CASE("per-program timeout stops its peer and retains observed termination s
         {SHRINK_PROGRAM_FIXTURE, {"wait", (workspace.directory / "r").string()}}, limits);
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == shrink::CandidateOutcome::lost);
-    REQUIRE(result.execution.programs[0].stop_reasons == std::vector{shrink::StopReason::timeout});
-    REQUIRE(result.execution.programs[1].stop_reasons == std::vector{shrink::StopReason::peer_failure});
-    REQUIRE(result.execution.programs[0].signal == SIGKILL);
-    REQUIRE(result.execution.programs[0].elapsed_ms >= 500);
-    REQUIRE(result.execution.programs[0].reaped);
-    REQUIRE(result.execution.programs[1].reaped);
+    REQUIRE(result.execution.programs.solution.stop_reasons == std::vector{shrink::StopReason::timeout});
+    REQUIRE(result.execution.programs.reference.stop_reasons == std::vector{shrink::StopReason::peer_failure});
+    REQUIRE(result.execution.programs.solution.signal == SIGKILL);
+    REQUIRE(result.execution.programs.solution.elapsed_ms >= 500);
+    REQUIRE(result.execution.programs.solution.reaped);
+    REQUIRE(result.execution.programs.reference.reaped);
 }
 TEST_CASE("early stdin closure and permission failure release every owned descriptor", "[runner]") {
     Workspace workspace;
@@ -199,7 +202,7 @@ TEST_CASE("early stdin closure and permission failure release every owned descri
         auto early = shrink::evaluate_candidate(runner, std::string(1'048'576, '1'), text("1"), text("1"), {});
         REQUIRE(early.outcome == shrink::CandidateOutcome::lost);
         REQUIRE(early.execution.errors.empty());
-        REQUIRE(early.execution.programs[0].successful());
+        REQUIRE(early.execution.programs.solution.successful());
         auto denied = shrink::evaluate_candidate(runner, "0\n\n", text("1"), {forbidden, {}}, {});
         REQUIRE_FALSE(denied.outcome);
         REQUIRE(denied.execution.errors[0].system_error == EACCES);
@@ -224,7 +227,7 @@ TEST_CASE("runner preserves caller signal state in supplied programs", "[runner]
         {SHRINK_PROGRAM_FIXTURE, {"signal-state"}}, text("1 1"), {});
     REQUIRE(result.execution.errors.empty());
     REQUIRE(result.outcome == shrink::CandidateOutcome::lost);
-    REQUIRE(result.execution.programs[0].stdout_bytes == "1 1");
+    REQUIRE(result.execution.programs.solution.stdout_bytes == "1 1");
     sigset_t mask; sigprocmask(SIG_SETMASK, nullptr, &mask);
     struct sigaction action{}; sigaction(SIGUSR1, nullptr, &action);
     REQUIRE(sigismember(&mask, SIGUSR2) == 1);
@@ -266,7 +269,7 @@ TEST_CASE("explicit paths inherit working directory and environment with literal
     auto result = shrink::evaluate_candidate(runner, "0\n\n",
         {relative, {"arguments", "a b", "$(echo shell)", "", "--flag"}}, text("different"), {});
     REQUIRE(result.outcome == shrink::CandidateOutcome::preserved);
-    REQUIRE(result.execution.programs[0].stdout_bytes == std::filesystem::current_path().string()
+    REQUIRE(result.execution.programs.solution.stdout_bytes == std::filesystem::current_path().string()
         + "\ninherited value\n3:a b\n13:$(echo shell)\n0:\n6:--flag\n");
     auto no_lookup = shrink::evaluate_candidate(runner, "0\n\n", {"true", {}}, text("1"), {});
     REQUIRE_FALSE(no_lookup.outcome);
@@ -299,8 +302,8 @@ TEST_CASE("runner evaluation and cleanup never reap a host-owned child", "[runne
     REQUIRE(pending[1].awaiting_reap);
     REQUIRE(cleanup.resolved);
     REQUIRE(cleanup.errors.empty());
-    REQUIRE(cleanup.execution.programs[0].reaped);
-    REQUIRE(cleanup.execution.programs[1].reaped);
+    REQUIRE(cleanup.execution.programs.solution.reaped);
+    REQUIRE(cleanup.execution.programs.reference.reaped);
     REQUIRE_FALSE(runner.has_pending_ownership());
     REQUIRE(waited == host);
     REQUIRE(WIFEXITED(status));
@@ -314,9 +317,9 @@ TEST_CASE("partial startup failure kills and reaps the already launched peer", "
         {workspace.directory / "missing", {}}, {});
     REQUIRE_FALSE(result.outcome);
     REQUIRE(result.execution.errors[0].code == shrink::RunnerErrorCode::launch);
-    REQUIRE(result.execution.programs[0].launched);
-    REQUIRE(result.execution.programs[0].signal == SIGKILL);
-    REQUIRE(result.execution.programs[0].reaped);
-    REQUIRE(result.execution.programs[1].reaped);
+    REQUIRE(result.execution.programs.solution.launched);
+    REQUIRE(result.execution.programs.solution.signal == SIGKILL);
+    REQUIRE(result.execution.programs.solution.reaped);
+    REQUIRE(result.execution.programs.reference.reaped);
     REQUIRE_FALSE(runner.has_pending_ownership());
 }

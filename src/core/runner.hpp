@@ -30,6 +30,10 @@ inline constexpr std::size_t stdout_limit = 8'388'608;
 inline constexpr std::size_t stderr_limit = 65'536;
 
 enum class ProgramRole { solution, reference };
+namespace detail {
+inline constexpr std::array program_roles{ProgramRole::solution, ProgramRole::reference};
+inline constexpr std::size_t program_count = program_roles.size();
+}
 
 enum class StopReason { timeout, stdout_overflow, cancellation, peer_failure, runner_error };
 enum class RunnerErrorCode { configuration, launch, io, status, cleanup, pending_ownership };
@@ -57,8 +61,19 @@ struct ExecutionEvidence {
     // Pending execution is neither successful nor unsuccessful.
     bool unsuccessful() const;
 };
+struct ProgramExecutions {
+    ExecutionEvidence solution;
+    ExecutionEvidence reference;
+
+    ExecutionEvidence& for_role(ProgramRole role) {
+        return role == ProgramRole::solution ? solution : reference;
+    }
+    const ExecutionEvidence& for_role(ProgramRole role) const {
+        return role == ProgramRole::solution ? solution : reference;
+    }
+};
 struct ExecutionPair {
-    std::array<ExecutionEvidence, 2> programs;
+    ProgramExecutions programs;
     std::vector<RunnerError> errors;
     bool cancelled = false;
 };
@@ -106,7 +121,7 @@ private:
     struct OutputCollection { bool stdout_closed = false; bool stderr_closed = false; };
     static bool collect_event(ExecutionEvidence& evidence, OutputCollection& collection,
                               const detail::ExecutionEvent& event);
-    std::array<OutputCollection, 2> retained_collection_{};
+    std::array<OutputCollection, detail::program_count> retained_collection_{};
     ExecutionPair retained_;
 };
 }
