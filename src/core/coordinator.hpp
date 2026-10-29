@@ -36,5 +36,10 @@ struct PreparedRequest {
     std::string normalized_input;
 };
 
+// Shared program-path/argument and per-program deadline validation. Overall
+// reduction budgets are validated by prepare_request, not candidate execution.
+std::optional<ValidationError> validate_execution_configuration(
+    const ProgramSpec& solution, const ProgramSpec& reference, const RunLimits& limits);
+
 std::variant<PreparedRequest, ValidationError> prepare_request(ReductionRequest request);
 }

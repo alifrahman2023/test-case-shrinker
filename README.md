@@ -2,7 +2,7 @@
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
 The current implementation provides `--help`, `--version`, and request/input/file
-validation. Program execution and reduction are being implemented in subsequent tickets under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10).
+validation. The internal core also evaluates wrong-answer candidates with concurrent, bounded programs; CLI execution and reduction remain subsequent tickets under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10).
 
 The supported baseline is macOS 15 on Apple Silicon (ARM64), using Apple Clang
 and C++20. Newer macOS versions are not rejected. Development requires Apple's
@@ -46,9 +46,9 @@ cd /tmp
 Only `bin/shrink` is installed. The internal static `shrink_core` library is
 shared by the CLI and direct Catch2 tests; it is not a public SDK and has no
 stable API or ABI. Ordinary `.hpp`/`.cpp` boundaries under `src/core` separate
-input format, coordinator, evaluator, and runner responsibilities. These four
-modules separate strict input preparation and typed request validation from the
-future evaluator and runner implementations.
+input format, coordinator, evaluator, and runner responsibilities. The input
+format and coordinator prepare typed requests; the evaluator classifies exact
+output-token disagreement while the runner owns concurrent Mac execution.
 Flags and terminal output belong in `src/cli`.
 
 Every pull request and update to `main` runs the full Debug CTest suite and an
@@ -84,3 +84,62 @@ Input and output must be regular files (a new output is allowed), and the output
 parent must exist. Input and executable symlinks are permitted; output symlinks
 are rejected. Output may not alias the original input or either executable,
 including through hard links or symlinks in protected paths or parent directories.
+
+Internal candidate evaluation accepts already normalized bytes, two explicit
+`ProgramSpec` paths with ordered arguments, positive per-program timeouts, and a
+caller-owned `CancellationToken`. Programs inherit the working directory,
+environment, and intended signal state. They must create no descendants. The
+runner installs no application-wide signal handlers and intercepts cancellation
+and deadline waits at intervals no longer than 5 ms when scheduled.
+
+Each program retains at most 8,388,608 unchanged stdout bytes (one extra byte
+fails execution) and the first 65,536 stderr bytes (extra bytes are drained and
+marked). `Evaluation` owns its output and records disagreement using byte offsets
+and a one-based token position; end-of-output is explicit. It has no ordinary
+outcome on cancellation or operational error. Token scanning and comparison
+also check cancellation in bounded chunks. Exit/signal facts remain separate
+from timeout, overflow, cancellation, and peer-stop reasons. A completed wrong
+answer requires zero exits, complete output, and successful cleanup for both.
+
+`Runner` is caller-owned and allows one synchronous evaluation or cleanup
+operation at a time. Concurrent calls and reentry are unsupported, except
+cancellation requests.
+Hosts must not independently reap its children or install incompatible SIGCHLD
+handling. Required stops use immediate SIGKILL and a shared maximum one-second
+cleanup wait. If cleanup remains unresolved, the result reports a typed error
+and known process facts, `has_pending_ownership()` remains true, and further
+evaluations are refused. The runner retains the actual process/descriptor
+ownership. Uncertain descriptor release also stays pending, without blindly
+retrying a descriptor number that might have been reused. Diagnostic process identifiers never authorize caller signaling or
+reaping. Destroying a runner with pending ownership terminates as a caller
+contract violation, without an indefinite destructor wait. A continuing host
+retains and services pending ownership with
+`pending_ownership()` and `cleanup(wait, cancellation)`. Inspection returns owning
+diagnostics for each unresolved role: known process identifier, whether reaping
+is pending, open descriptor count, and uncertain-release count. Diagnostics do
+not transfer process or descriptor ownership.
+
+Each cleanup attempt retries termination and servicing of existing resources,
+without launching programs. Its shared sleep-inclusive wait is between zero and
+1,000 ms (default 1,000); zero makes one nonblocking pass. Cancellation interrupts
+waiting while retaining unresolved work. `CleanupResult::resolved` reports full
+release, `errors` reports that attempt's errors, and `execution` owns the latest
+facts/output plus the original evaluation errors. Recovery never turns the
+original failed evaluation into a successful candidate. Once ownership fully
+resolves, new evaluations are admitted. A failed close is not retried blindly:
+read-only inspection can establish that a descriptor is gone; an occupied,
+possibly reused number remains uncertain.
+
+Bounds promise prompt action when shrink can run, without a hard real-time,
+kernel-operation, callback, or scheduling bound. The CLI may report an error and
+exit; users need not keep it open indefinitely. CLI exit or a hard kill cannot
+guarantee continued cleanup or termination of unresolved children. No background
+manager, process-tree traversal, descendant detection, or sandbox is provided.
+Supplied programs must create no descendants; threads remain permitted under
+the determinism prerequisite. The CLI does not yet invoke this evaluator.
+
+Run the native execution and controlled clock/event groups with:
+
+```sh
+build/debug/shrink_core_tests '[runner],[execution-events]'
+```
