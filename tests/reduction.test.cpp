@@ -620,6 +620,9 @@ TEST_CASE("individual repeated-element changes can succeed after duplicate-wide 
 namespace {
 using Values = std::vector<std::int64_t>;
 using Predicate = std::function<CandidateOutcome(const Values&)>;
+auto value_rank(std::int64_t value) {
+    return std::pair{value < 0 ? -static_cast<__int128>(value) : static_cast<__int128>(value), value < 0};
+}
 ReductionResult scripted_reduction(ReductionRequest input, const Predicate& predicate,
                                    std::vector<std::string>* accepted = nullptr) {
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
@@ -638,11 +641,10 @@ ReductionResult scripted_reduction(ReductionRequest input, const Predicate& pred
         REQUIRE(std::holds_alternative<Values>(parse_input(event.best.normalized_input, constraints)));
         REQUIRE(predicate(event.best.values) == CandidateOutcome::preserved);
         // Independent ranking oracle uses a wider signed integer.
-        auto rank = [](std::int64_t v) { return std::pair{v < 0 ? -static_cast<__int128>(v) : static_cast<__int128>(v), v < 0}; };
         REQUIRE((event.best.values.size() < previous.size() ||
             (event.best.values.size() == previous.size() && std::lexicographical_compare(
                 event.best.values.begin(), event.best.values.end(), previous.begin(), previous.end(),
-                [&](auto a, auto b) { return rank(a) < rank(b); }))));
+                [&](auto a, auto b) { return value_rank(a) < value_rank(b); }))));
         previous = event.best.values;
         if (accepted) accepted->push_back(event.best.normalized_input);
     };
@@ -659,10 +661,9 @@ void check_local_guarantee(const ReductionResult& result, const InputConstraints
         const auto text = serialize_input(candidate);
         if (std::holds_alternative<ValidationError>(parse_input(text, constraints))) return;
         if (candidate == original) return;
-        auto rank = [](std::int64_t v) { return std::pair{v < 0 ? -static_cast<__int128>(v) : static_cast<__int128>(v), v < 0}; };
         if (candidate.size() == original.size() && !std::lexicographical_compare(
             candidate.begin(), candidate.end(), original.begin(), original.end(),
-            [&](auto a, auto b) { return rank(a) < rank(b); })) return;
+            [&](auto a, auto b) { return value_rank(a) < value_rank(b); })) return;
         REQUIRE(predicate(candidate) != CandidateOutcome::preserved);
         if (predicate(candidate) == CandidateOutcome::inconclusive) inconclusive.insert(text);
     };
