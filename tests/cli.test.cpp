@@ -671,8 +671,20 @@ TEST_CASE("CLI throttles progress and quiet retains evidence summary and saved r
         auto progress = errors.str().find("Progress:");
         REQUIRE((progress == std::string::npos) == quiet);
         if (!quiet) {
-            REQUIRE(errors.str().find("Progress:", progress + 1) == std::string::npos);
-            REQUIRE(errors.str().find("evaluations 1; acceptances 1; best length 2; elapsed") != std::string::npos);
+            std::istringstream lines(errors.str());
+            std::string line;
+            std::uint64_t previous = 0;
+            while (std::getline(lines, line)) {
+                if (!line.starts_with("Progress:")) continue;
+                REQUIRE(line.find("evaluations ") != std::string::npos);
+                REQUIRE(line.find("; acceptances ") != std::string::npos);
+                REQUIRE(line.find("; best length ") != std::string::npos);
+                const auto marker = line.find("; elapsed ");
+                REQUIRE(marker != std::string::npos);
+                const auto elapsed = std::stoull(line.substr(marker + 10));
+                REQUIRE(elapsed - previous >= 1000);
+                previous = elapsed;
+            }
         }
         REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
         REQUIRE(errors.str().find("candidate evaluations: 2; acceptances: 2") != std::string::npos);

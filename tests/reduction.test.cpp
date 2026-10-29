@@ -518,3 +518,31 @@ TEST_CASE("removal accepts repeatable valid strict decreases with observed prese
         prior = accepted;
     }
 }
+TEST_CASE("progress elapsed time includes the preceding checkpoint callback", "[reduction][removal]") {
+    auto backend = std::make_unique<BaselineBackend>(); auto* clock = backend.get();
+    clock->service_delay = 1000;
+    Runner runner(std::move(backend));
+    auto input = request(); input.limits.max_evaluations = 1;
+    std::vector<std::uint64_t> progress;
+    RunHooks hooks;
+    hooks.save = [&](const SaveRequest& save) -> SaveResult {
+        if (save.kind == SaveKind::periodic) clock->clock += 500;
+        return {};
+    };
+    hooks.notify = [&](const RunEvent& event) {
+        if (event.kind == RunEventKind::progress) progress.push_back(event.statistics.elapsed_ms);
+    };
+    auto result = reduce(std::move(input), runner, {}, hooks);
+    REQUIRE(progress == std::vector<std::uint64_t>{1000, 2500});
+    REQUIRE(result.statistics.elapsed_ms == 2500);
+}
+TEST_CASE("evaluation limit at removal exhaustion still stops without claiming full completion", "[reduction][removal]") {
+    Runner runner(std::make_unique<BaselineBackend>());
+    auto input = request(); input.input_text = "1 7"; input.limits.max_evaluations = 1;
+    auto result = reduce(std::move(input), runner);
+    REQUIRE(result.best->normalized_input == "0\n\n");
+    REQUIRE(result.outcome == RunOutcome::evaluation_limit);
+    REQUIRE(result.observed_reasons.evaluation_limit);
+    REQUIRE(result.errors.empty());
+    REQUIRE(result.statistics.round == RoundStatus::partial);
+}

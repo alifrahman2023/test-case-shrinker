@@ -32,10 +32,13 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
     observe_stops();
     result.statistics.baseline_evaluations = evaluation->execution.programs.solution.launched || evaluation->execution.programs.reference.launched ? 1 : 0;
     result.baseline.evaluation = evaluation;
-    for (const auto& error : evaluation->execution.errors)
-        result.errors.push_back({error.code == RunnerErrorCode::cleanup ? RunErrorKind::cleanup : RunErrorKind::runner,
-                                 error.operation, {}, error});
-    result.pending_ownership = runner.pending_ownership();
+    auto collect_execution_errors = [&](const Evaluation& observed) {
+        for (const auto& error : observed.execution.errors)
+            result.errors.push_back({error.code == RunnerErrorCode::cleanup ? RunErrorKind::cleanup : RunErrorKind::runner,
+                                     error.operation, {}, error});
+        result.pending_ownership = runner.pending_ownership();
+    };
+    collect_execution_errors(*evaluation);
     if (!result.errors.empty()) {
         result.baseline.status = BaselineStatus::operational_failure;
     } else if (evaluation->execution.cancelled || result.observed_reasons.cancellation || result.observed_reasons.time_limit) {
@@ -62,7 +65,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
         };
         notify(RunEventKind::baseline_verified);
         std::uint64_t last_save = runner.now_ms();
-        std::uint64_t last_progress = start;
+        std::uint64_t last_progress = 0;
         bool pending_save = false;
         auto save = [&](SaveKind kind) {
             if (!hooks.save) return;
@@ -94,8 +97,9 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
             auto between_evaluations = [&] {
                 if (observe_stops() || !result.errors.empty()) return true;
                 if (pending_save && runner.now_ms() - last_save >= 1000) save(SaveKind::periodic);
-                if (result.errors.empty() && runner.now_ms() - last_progress >= 1000) {
-                    last_progress = runner.now_ms();
+                if (observe_stops() || !result.errors.empty()) return true;
+                if (result.statistics.elapsed_ms - last_progress >= 1000) {
+                    last_progress = result.statistics.elapsed_ms;
                     notify(RunEventKind::progress);
                 }
                 return observe_stops() || !result.errors.empty();
@@ -135,10 +139,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                     if (candidate->execution.programs.solution.launched || candidate->execution.programs.reference.launched)
                         ++result.statistics.candidate_evaluations;
                     observe_stops();
-                    for (const auto& error : candidate->execution.errors)
-                        result.errors.push_back({error.code == RunnerErrorCode::cleanup ? RunErrorKind::cleanup : RunErrorKind::runner,
-                                                 error.operation, {}, error});
-                    result.pending_ownership = runner.pending_ownership();
+                    collect_execution_errors(*candidate);
                     if (!candidate->execution.errors.empty()) result.operational_evaluation = candidate;
                     if (!result.errors.empty() || observe_stops() || !candidate->outcome) { stopped = true; break; }
                     if (candidate->outcome == CandidateOutcome::preserved) {
@@ -162,6 +163,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
             if (!result.errors.empty()) result.outcome = RunOutcome::operational_stop;
             else if (result.observed_reasons.cancellation) result.outcome = RunOutcome::cancelled;
             else if (result.observed_reasons.time_limit) result.outcome = RunOutcome::time_limit;
+            else if (result.observed_reasons.evaluation_limit) result.outcome = RunOutcome::evaluation_limit;
             else if (!stopped) result.errors.push_back({RunErrorKind::search_unavailable,
                 "removal pass exhausted; remaining reduction passes are not yet available", {}, {}});
         }
