@@ -394,10 +394,11 @@ TEST_CASE("CLI leaves an existing default output unchanged on rejection", "[cli]
 
 namespace {
 std::vector<std::string> fixture_arguments(const Workspace& workspace, const std::vector<std::string>& solution,
-                                          const std::vector<std::string>& reference) {
+                                          const std::vector<std::string>& reference,
+                                          std::optional<std::uint64_t> budget = 0) {
     auto arguments = workspace.arguments();
     arguments[3] = SHRINK_PROGRAM_FIXTURE; arguments[5] = SHRINK_PROGRAM_FIXTURE;
-    arguments.push_back("--max-evaluations=0");
+    if (budget) arguments.push_back("--max-evaluations=" + std::to_string(*budget));
     for (const auto& argument : solution) arguments.push_back("--solution-arg=" + argument);
     for (const auto& argument : reference) arguments.push_back("--reference-arg=" + argument);
     return arguments;
@@ -643,8 +644,7 @@ TEST_CASE("CLI caps stderr preview after escaping control bytes", "[cli-baseline
 }
 TEST_CASE("CLI budgeted removal saves smaller evidence and resume verifies with distinct destination", "[cli-removal]") {
     Workspace workspace;
-    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"});
-    arguments[16] = "--max-evaluations=1";
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"}, 1);
     std::ostringstream output, errors;
     REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
     REQUIRE(output.str().empty());
@@ -662,8 +662,7 @@ TEST_CASE("CLI budgeted removal saves smaller evidence and resume verifies with 
 TEST_CASE("CLI throttles progress and quiet retains evidence summary and saved result", "[cli-removal]") {
     Workspace workspace;
     for (bool quiet : {false, true}) {
-        auto arguments = fixture_arguments(workspace, {"slow-text", "600", "1"}, {"text", "2"});
-        arguments[16] = "--max-evaluations=2";
+        auto arguments = fixture_arguments(workspace, {"slow-text", "600", "1"}, {"text", "2"}, 2);
         if (quiet) arguments.push_back("--quiet");
         std::ostringstream output, errors;
         REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
@@ -693,8 +692,7 @@ TEST_CASE("CLI throttles progress and quiet retains evidence summary and saved r
 }
 TEST_CASE("CLI failed final replacement recovers full reduced best and retains saved baseline", "[cli-removal]") {
     Workspace workspace;
-    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"});
-    arguments[16] = "--max-evaluations=1";
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"}, 1);
     shrink::cli::InvocationServices services;
     services.save = [](const fs::path& path, const shrink::SaveRequest& save) {
         shrink::cli::SaveFileOperations operations;
@@ -712,8 +710,7 @@ TEST_CASE("CLI failed final replacement recovers full reduced best and retains s
 }
 TEST_CASE("CLI unrestricted search completes with a precise local guarantee and reused final evidence", "[cli-values]") {
     Workspace workspace;
-    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"});
-    arguments.erase(arguments.begin() + 16); // No evaluation budget.
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"}, std::nullopt);
     std::ostringstream output, errors;
     REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 0);
     REQUIRE(workspace.read("result.txt") == "0\n\n");
@@ -729,8 +726,7 @@ TEST_CASE("CLI unrestricted search completes with a precise local guarantee and 
 TEST_CASE("CLI simplifies duplicate failures and retains completed guarantee when final saving fails", "[cli-values]") {
     Workspace workspace;
     workspace.write("original input.txt", "3 42 7 42");
-    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"});
-    arguments.erase(arguments.begin() + 16);
+    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"}, std::nullopt);
     for (bool fail_final : {false, true}) {
         shrink::cli::InvocationServices services;
         services.save = [fail_final](const fs::path& path, const shrink::SaveRequest& save) {
@@ -751,8 +747,7 @@ TEST_CASE("CLI simplifies duplicate failures and retains completed guarantee whe
 TEST_CASE("CLI completed cache modes preserve real-program result and counts without a cache flag", "[cli-cache]") {
     Workspace workspace;
     workspace.write("original input.txt", "3 42 7 42");
-    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"});
-    arguments.erase(arguments.begin() + 16);
+    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"}, std::nullopt);
     std::uint64_t uncached_evaluations = 0;
     for (const auto& cache : std::vector<shrink::detail::CacheControls>{
         {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}, {.max_text_bytes = 4}}) {
@@ -777,8 +772,7 @@ TEST_CASE("CLI completed cache modes preserve real-program result and counts wit
 TEST_CASE("CLI cached inconclusive checks retain exact uncertainty counts with fewer executions", "[cli-cache]") {
     Workspace workspace;
     workspace.write("original input.txt", "2 5 5");
-    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"original-pair-reference"});
-    arguments.erase(arguments.begin() + 16);
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"original-pair-reference"}, std::nullopt);
     for (const auto& cache : std::vector<shrink::detail::CacheControls>{
         {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}}) {
         shrink::cli::InvocationServices services; services.cache = cache;
@@ -832,8 +826,7 @@ TEST_CASE("CLI overall expiry terminates both real programs and retains only ver
         Workspace workspace;
         const std::string threshold = verified ? "3" : "4";
         auto arguments = fixture_arguments(workspace, {"wait-below-length", "solution-ready", "1", threshold},
-                                                      {"wait-below-length", "reference-ready", "2", threshold});
-        arguments.erase(arguments.begin() + 16);
+                                                      {"wait-below-length", "reference-ready", "2", threshold}, std::nullopt);
         arguments.insert(arguments.end(), {"--time-limit=1s", "--solution-timeout=10s", "--reference-timeout=10s"});
         auto backend = std::make_unique<ReadyDeadlineClock>(); auto* observed = backend.get();
         shrink::Runner runner(std::move(backend));
