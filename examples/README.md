@@ -1,4 +1,53 @@
-# Two wrong-answer demonstrations
+# Try shrink: five wrong-answer examples
+
+Each folder contains a faulty `solution` binary, a trusted `reference` binary,
+their standalone C++ sources, an `original.txt` input, problem/constraint notes,
+and a `run.sh` script with the appropriate shrink command.
+
+| Folder | Problem | Deliberate mistake |
+| --- | --- | --- |
+| [duplicates](duplicates/README.md) | Count distinct values | Assumes equal values are adjacent. |
+| [width](width/README.md) | Multiply two values | Uses a 32-bit product instead of 64 bits. |
+| [maximum](maximum/README.md) | Find the largest value | Initializes the maximum to zero. |
+| [sum-last](sum-last/README.md) | Sum all elements | Omits the last element. |
+| [lower-median](lower-median/README.md) | Find the lower median | Chooses the upper median for even lengths. |
+
+## Run an example
+
+Install or build `shrink` using the [installation instructions](../README.md#installation),
+then run from the repository root:
+
+```sh
+./examples/duplicates/solution < examples/duplicates/original.txt
+./examples/duplicates/reference < examples/duplicates/original.txt
+./examples/duplicates/run.sh
+cat examples/duplicates/reduced.txt
+```
+
+Repeat with any folder in the table. Each script works from any working directory
+and saves `reduced.txt` beside its input by default. Pass a different output path
+as its first argument. Existing output is replaced after successful verification.
+Scripts use `SHRINK_BIN` when set, otherwise an installed `shrink`, then a local
+`build/release/shrink` or `build/debug/shrink` executable.
+
+```sh
+SHRINK_BIN="$PWD/build/debug/shrink" ./examples/maximum/run.sh /tmp/maximum.txt
+```
+
+The committed solution/reference binaries are example fixtures for **macOS 15+
+on Apple Silicon (ARM64)**. They are separate from the shrink command itself.
+Build them again after editing their sources, or to use your local compiler:
+
+```sh
+./examples/build.sh
+```
+
+This requires Apple's Command Line Tools and compiles all ten programs with
+Apple Clang, C++20, optimization, and a macOS 15 deployment target. Generated
+reduced inputs stay local. Shrink still accepts already compiled programs and
+does not compile them itself.
+
+## Detailed demonstrations
 
 Run these commands from the repository root on native macOS with Apple Clang
 and CMake 3.24 or newer. The supported baseline is macOS 15 ARM64. Both examples
@@ -10,10 +59,10 @@ cmake --build build/debug --parallel 3
 mkdir -p build/demo-results
 ```
 
-CMake compiles the four demonstration programs for the Mac where they run.
+CMake compiles the demonstration programs for the Mac where they run.
 The initial test configuration fetches pinned Catch2 from GitHub. Shrink takes
 already compiled executable paths; it does not compile user programs. Only
-`shrink` is installed; these programs stay in the build directory.
+`shrink` is installed; CMake's compiled programs stay in the build directory.
 
 ## Duplicate handling: count distinct values
 

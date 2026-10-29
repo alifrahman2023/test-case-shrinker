@@ -92,8 +92,10 @@ stderr. Ordinary stdout stays empty. Status `0` means local irreducibility under
 the supported checks, with any inconclusive checks reported. It does not promise
 the globally smallest input or the same underlying bug.
 
-For a complete example with supplied programs and expected results, see
-[the duplicate-handling and arithmetic-width demonstrations](examples/README.md).
+Try [five hands-on examples](examples/README.md), each with solution/reference
+binaries and C++ sources, an input, problem notes, and a ready-to-run script.
+They cover duplicates, arithmetic width, negative maxima, an omitted last element,
+and sorted-array medians.
 
 ## Commands
 

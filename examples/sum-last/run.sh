@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+example_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$example_directory/../find-shrink.sh"
+exec "$shrink_executable" \
+    --input "$example_directory/original.txt" \
+    --solution "$example_directory/solution" --reference "$example_directory/reference" \
+    --min-length 0 --max-length 8 --min-value=-100 --max-value 100 \
+    --output "${1:-$example_directory/reduced.txt}"
