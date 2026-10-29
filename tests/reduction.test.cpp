@@ -988,3 +988,21 @@ TEST_CASE("real compiled programs preserve completed accepted sequences across c
         REQUIRE(result.statistics.distinct_inconclusive_candidates == 0);
     }
 }
+TEST_CASE("final-round uncertainty includes cache hits learned before an acceptance", "[reduction][cache]") {
+    auto input = request(); input.input_text = "2 5 5"; input.constraints = {0, 2, 0, 5}; input.limits.max_evaluations.reset();
+    Predicate preserves = [](const Values& v) {
+        return v == Values{5, 5} || v == Values{0, 5} ? CandidateOutcome::preserved : CandidateOutcome::inconclusive;
+    };
+    std::vector<std::string> accepted, plain_accepted;
+    auto cached = scripted_reduction(input, preserves, &accepted, {.forced_fingerprint = 0});
+    auto plain = scripted_reduction(input, preserves, &plain_accepted, {.enabled = false});
+    REQUIRE(cached.outcome == RunOutcome::completed);
+    REQUIRE(cached.best->values == Values{0, 5});
+    REQUIRE(accepted == plain_accepted);
+    REQUIRE(cached.statistics.candidate_evaluations == 6);
+    REQUIRE(plain.statistics.candidate_evaluations == 9);
+    REQUIRE(cached.statistics.inconclusive_executions == 5);
+    REQUIRE(cached.statistics.distinct_inconclusive_candidates == 4);
+    REQUIRE(plain.statistics.distinct_inconclusive_candidates == 4);
+    check_local_guarantee(cached, input.constraints, 0, preserves);
+}

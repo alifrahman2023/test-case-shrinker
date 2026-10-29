@@ -106,6 +106,10 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
             bool stopped = false;
             detail::EvaluationCache cache(cache_controls);
             std::unordered_set<std::string> inconclusive;
+            auto record_inconclusive = [&](std::string text) {
+                inconclusive.insert(std::move(text));
+                result.statistics.distinct_inconclusive_candidates = inconclusive.size();
+            };
             auto between_evaluations = [&] {
                 if (observe_stops() || !result.errors.empty()) return true;
                 if (pending_save && runner.now_ms() - last_save >= 1000) save(SaveKind::periodic);
@@ -155,8 +159,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                 if (observe_stops()) { stopped = true; return false; }
                 if (cached) {
                     if (*cached == CandidateOutcome::inconclusive) {
-                        inconclusive.insert(std::move(text));
-                        result.statistics.distinct_inconclusive_candidates = inconclusive.size();
+                        record_inconclusive(std::move(text));
                     }
                     return false;
                 }
@@ -181,8 +184,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                 if (candidate->outcome == CandidateOutcome::lost) ++result.statistics.lost_executions;
                 else {
                     ++result.statistics.inconclusive_executions;
-                    inconclusive.insert(std::move(text));
-                    result.statistics.distinct_inconclusive_candidates = inconclusive.size();
+                    record_inconclusive(std::move(text));
                 }
                 return false;
             };

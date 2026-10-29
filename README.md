@@ -43,8 +43,8 @@ memory. Fingerprints index candidates, but exact normalized text decides reuse,
 so collisions cannot skip preserving candidates. Accepted inputs, operational
 errors and unfinished evaluations are never cached. FIFO eviction bounds retained
 candidate text to 8 MiB and entries to 4,096; oversized candidates execute without
-being cached. The cache retains no execution history and does not persist across
-invocations or resume.
+being cached. The cache stores normalized identities and classifications, without execution
+evidence. It does not persist across invocations or resume.
 
 Cache hits and invalid candidates consume no evaluation budget. Actual execution
 counts remain separate from distinct inconclusive texts in the current/final
