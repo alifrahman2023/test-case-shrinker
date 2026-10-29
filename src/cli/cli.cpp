@@ -35,7 +35,7 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
                   "Value options accept --option value or --option=value. Program arguments\n"
                   "beginning with '-' require the equals form. No shell interpretation.\n"
                   "Programs must be deterministic and create no descendant processes.\n"
-                  "Use an evaluation budget to stop removal early; remaining passes are not yet available.\n";
+                  "Search repeats removal and value simplification until local irreducibility or an early stop.\n";
         return output ? 0 : 1;
     }
     if (arguments.size() == 1 && arguments.front() == "--version") {

@@ -649,7 +649,7 @@ TEST_CASE("CLI budgeted removal saves smaller evidence and resume verifies with 
     REQUIRE(output.str().empty());
     REQUIRE(workspace.read("result.txt") == "2\n-2 7\n");
     REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n");
-    REQUIRE(errors.str().find("Removal round unfinished") != std::string::npos);
+    REQUIRE(errors.str().find("Reduction round unfinished") != std::string::npos);
     REQUIRE(errors.str().find("candidate evaluations: 1; acceptances: 1") != std::string::npos);
     REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
     arguments[1] = "result.txt"; arguments[15] = "resumed.txt";
@@ -708,4 +708,42 @@ TEST_CASE("CLI failed final replacement recovers full reduced best and retains s
     REQUIRE(errors.str().find("Saved revision 1:") != std::string::npos);
     REQUIRE(errors.str().find("Final save: failed") != std::string::npos);
     REQUIRE(errors.str().find("Observed: evaluation limit") != std::string::npos);
+}
+TEST_CASE("CLI unrestricted search completes with a precise local guarantee and reused final evidence", "[cli-values]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"});
+    arguments.erase(arguments.begin() + 16); // No evaluation budget.
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 0);
+    REQUIRE(workspace.read("result.txt") == "0\n\n");
+    REQUIRE(output.str().empty());
+    REQUIRE(errors.str().find("Complete final round") != std::string::npos);
+    REQUIRE(errors.str().find("Irreducible under supported local checks") != std::string::npos);
+    REQUIRE(errors.str().find("every single-element removal") != std::string::npos);
+    REQUIRE(errors.str().find("one occurrence of a repeated value") != std::string::npos);
+    REQUIRE(errors.str().find("first differing token: 1") != std::string::npos);
+    REQUIRE(errors.str().find("irreducibility was not established") == std::string::npos);
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n1\n7\n0\n\n");
+}
+TEST_CASE("CLI simplifies duplicate failures and retains completed guarantee when final saving fails", "[cli-values]") {
+    Workspace workspace;
+    workspace.write("original input.txt", "3 42 7 42");
+    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"});
+    arguments.erase(arguments.begin() + 16);
+    for (bool fail_final : {false, true}) {
+        shrink::cli::InvocationServices services;
+        services.save = [fail_final](const fs::path& path, const shrink::SaveRequest& save) {
+            shrink::cli::SaveFileOperations operations;
+            if (fail_final && save.kind == shrink::SaveKind::final)
+                operations.rename = [](const char*, const char*) { errno = EACCES; return -1; };
+            return shrink::cli::save_atomic(path, save, operations);
+        };
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == (fail_final ? 1 : 0));
+        REQUIRE(output.str() == (fail_final ? "2\n0 0\n" : ""));
+        REQUIRE(errors.str().find("Complete final round") != std::string::npos);
+        REQUIRE(errors.str().find("Irreducible under supported local checks") != std::string::npos);
+        REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+        REQUIRE(workspace.read("result.txt") == (fail_final ? "3\n42 7 42\n" : "2\n0 0\n"));
+    }
 }

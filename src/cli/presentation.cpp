@@ -101,9 +101,16 @@ int present_result(const ReductionResult& result, const std::filesystem::path& d
     if (result.statistics.round == RoundStatus::not_started)
         errors << "No reduction round began; distinct inconclusive candidates: 0 (no round).\n";
     else
-        errors << "Removal round unfinished; distinct inconclusive candidates: "
-               << result.statistics.distinct_inconclusive_candidates << " (partial round).\n";
-    errors << "Further reduction may be possible; irreducibility was not established.\n";
+        errors << (result.statistics.round == RoundStatus::complete ? "Complete final round" : "Reduction round unfinished")
+               << "; distinct inconclusive candidates: " << result.statistics.distinct_inconclusive_candidates
+               << (result.statistics.round == RoundStatus::complete ? " (complete round).\n" : " (partial round).\n");
+    if (result.statistics.round == RoundStatus::complete)
+        errors << "Irreducible under supported local checks: every single-element removal; replacing all occurrences "
+                  "of each distinct value, or one occurrence of a repeated value, with the simplest allowed value, "
+                  "one unit toward zero, or its representable positive counterpart when negative. "
+                  "Every applicable strictly smaller check was invalid, lost the wrong answer, or was inconclusive.\n"
+                  "This is a local guarantee; smaller failing inputs may exist and preservation does not establish the same underlying bug.\n";
+    else errors << "Further reduction may be possible; irreducibility was not established.\n";
     if (result.saving.last_saved_revision) errors << "Saved revision " << *result.saving.last_saved_revision << ": " << destination << '\n';
     if (!result.best) {
         std::error_code ignored;

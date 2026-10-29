@@ -10,7 +10,7 @@ enum class RunOutcome { invalid_request, baseline_rejected, completed, evaluatio
 enum class RoundStatus { not_started, partial, complete };
 enum class BaselineStatus { not_run, interrupted, agreement, solution_unsuccessful,
                             reference_unsuccessful, operational_failure, verified };
-enum class RunErrorKind { validation, runner, cleanup, save, notification, search_unavailable };
+enum class RunErrorKind { validation, runner, cleanup, save, notification };
 struct RunError {
     RunErrorKind kind;
     std::string operation;

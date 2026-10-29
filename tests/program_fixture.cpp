@@ -6,6 +6,8 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
+#include <cstdint>
+#include <unordered_set>
 
 namespace {
 void emit(std::ostream& stream, std::size_t size, char byte) {
@@ -18,6 +20,16 @@ int main(int argc, char** argv) {
     if (argc < 2) return 99;
     const std::string mode = argv[1];
     if (mode == "text" && argc == 3) std::cout << argv[2];
+    else if (mode == "duplicate-bug") {
+        std::size_t length; std::cin >> length;
+        std::unordered_set<std::int64_t> seen;
+        bool duplicate = false;
+        for (std::size_t index = 0; index < length; ++index) {
+            std::int64_t value; if (!(std::cin >> value)) return 95;
+            if (!seen.insert(value).second) duplicate = true;
+        }
+        std::cout << (duplicate ? "duplicate" : "ok");
+    }
     else if (mode == "slow-text" && argc == 4) {
         usleep(static_cast<useconds_t>(std::stoul(argv[2]) * 1000));
         std::cout << argv[3];

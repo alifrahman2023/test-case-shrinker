@@ -1,8 +1,19 @@
 #include "reduction.hpp"
 #include <algorithm>
 #include <unordered_set>
+#include <unordered_map>
+#include <numeric>
+#include <limits>
 
 namespace shrink {
+namespace {
+std::uint64_t magnitude(std::int64_t value) {
+    return value < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(value) : static_cast<std::uint64_t>(value);
+}
+bool simpler(std::int64_t value, std::int64_t prior) {
+    return magnitude(value) < magnitude(prior) || (magnitude(value) == magnitude(prior) && value > prior);
+}
+}
 ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationToken cancellation, const RunHooks& hooks) {
     ReductionResult result;
     result.saving.configured = static_cast<bool>(hooks.save);
@@ -91,7 +102,6 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
             result.observed_reasons.evaluation_limit = true;
         }
         else {
-            result.statistics.round = RoundStatus::partial;
             bool stopped = false;
             std::unordered_set<std::string> inconclusive;
             auto between_evaluations = [&] {
@@ -104,68 +114,146 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                 }
                 return observe_stops() || !result.errors.empty();
             };
-            for (std::size_t chunk = std::max<std::size_t>(1, result.best->values.size() / 2); chunk; chunk /= 2) {
-                for (std::size_t position = 0; position < result.best->values.size();) {
-                    if (between_evaluations()) { stopped = true; break; }
-                    const auto count = std::min(chunk, result.best->values.size() - position);
-                    // A subsequence preserves value bounds, ordering and uniqueness.
-                    // Length is the only declared constraint removal can invalidate.
-                    if (result.best->values.size() - count < static_cast<std::uint64_t>(input.request.constraints.min_length)) {
-                        position += count;
-                        continue;
-                    }
-                    if (input.request.limits.max_evaluations && result.statistics.candidate_evaluations >= *input.request.limits.max_evaluations) {
-                        result.observed_reasons.evaluation_limit = true;
-                        result.outcome = RunOutcome::evaluation_limit;
-                        stopped = true;
+            // A transform returns no value for an element being removed.
+            // Generation, normalization and constraint checks share bounded
+            // cancellation polling, including candidates that never execute.
+            auto attempt = [&](auto transform) {
+                if (stopped || between_evaluations()) { stopped = true; return false; }
+                const auto& constraints = input.request.constraints;
+                std::vector<std::int64_t> values;
+                std::unordered_set<std::int64_t> unique;
+                std::string body;
+                for (std::size_t index = 0; index < result.best->values.size(); ++index) {
+                    if (index % 1024 == 0 && observe_stops()) { stopped = true; return false; }
+                    auto value = transform(index, result.best->values[index]);
+                    if (!value) continue;
+                    if (*value < constraints.min_value || *value > constraints.max_value) return false;
+                    if (!values.empty() && ((constraints.ordering == Ordering::ascending && *value < values.back())
+                        || (constraints.ordering == Ordering::descending && *value > values.back()))) return false;
+                    if (constraints.unique && !unique.insert(*value).second) return false;
+                    if (!values.empty()) body += ' ';
+                    values.push_back(*value);
+                    body += std::to_string(*value);
+                }
+                if (values.size() < static_cast<std::uint64_t>(constraints.min_length)
+                    || values.size() > static_cast<std::uint64_t>(constraints.max_length)) return false;
+                bool smaller = values.size() < result.best->values.size();
+                if (values.size() == result.best->values.size()) {
+                    for (std::size_t index = 0; index < values.size(); ++index) {
+                        if (index % 1024 == 0 && observe_stops()) { stopped = true; return false; }
+                        if (values[index] == result.best->values[index]) continue;
+                        smaller = simpler(values[index], result.best->values[index]);
                         break;
                     }
-                    std::vector<std::int64_t> values;
-                    std::string text = std::to_string(result.best->values.size() - count) + '\n';
-                    // Validate while generating. Removing elements cannot change
-                    // their bounds or relative order, or introduce duplicates.
-                    for (std::size_t index = 0; index < result.best->values.size(); ++index) {
-                        if (index % 1024 == 0 && observe_stops()) { stopped = true; break; }
-                        if (index >= position && index - position < count) continue;
-                        if (!values.empty()) text += ' ';
-                        values.push_back(result.best->values[index]);
-                        text += std::to_string(values.back());
-                    }
-                    text += '\n';
-                    if (stopped) break;
-                    if (observe_stops()) { stopped = true; break; }
-                    auto candidate = std::make_shared<Evaluation>(evaluate_candidate(runner, text,
-                        input.request.solution, input.request.reference, input.request.limits, execution_cancellation));
-                    if (candidate->execution.programs.solution.launched || candidate->execution.programs.reference.launched)
-                        ++result.statistics.candidate_evaluations;
-                    observe_stops();
-                    collect_execution_errors(*candidate);
-                    if (!candidate->execution.errors.empty()) result.operational_evaluation = candidate;
-                    if (!result.errors.empty() || observe_stops() || !candidate->outcome) { stopped = true; break; }
-                    if (candidate->outcome == CandidateOutcome::preserved) {
-                        result.best = VerifiedInput{std::move(values), std::move(text), result.best->revision + 1, candidate};
-                        ++result.statistics.acceptances;
-                        pending_save = true;
-                        notify(RunEventKind::acceptance);
-                    } else {
-                        if (candidate->outcome == CandidateOutcome::lost) ++result.statistics.lost_executions;
-                        else {
-                            ++result.statistics.inconclusive_executions;
-                            inconclusive.insert(std::move(text));
-                            result.statistics.distinct_inconclusive_candidates = inconclusive.size();
-                        }
-                        position += count;
+                }
+                if (!smaller) return false;
+                if (observe_stops()) { stopped = true; return false; }
+                if (result.observed_reasons.evaluation_limit) { stopped = true; return false; }
+                auto text = std::to_string(values.size()) + '\n' + body + '\n';
+                auto candidate = std::make_shared<Evaluation>(evaluate_candidate(runner, text,
+                    input.request.solution, input.request.reference, input.request.limits, execution_cancellation));
+                if (candidate->execution.programs.solution.launched || candidate->execution.programs.reference.launched)
+                    ++result.statistics.candidate_evaluations;
+                observe_stops();
+                collect_execution_errors(*candidate);
+                if (!candidate->execution.errors.empty()) result.operational_evaluation = candidate;
+                if (!result.errors.empty() || observe_stops() || !candidate->outcome) { stopped = true; return false; }
+                if (candidate->outcome == CandidateOutcome::preserved) {
+                    result.best = VerifiedInput{std::move(values), std::move(text), result.best->revision + 1, candidate};
+                    ++result.statistics.acceptances;
+                    pending_save = true;
+                    notify(RunEventKind::acceptance);
+                    if (observe_stops() || !result.errors.empty()) stopped = true;
+                    return true;
+                }
+                if (candidate->outcome == CandidateOutcome::lost) ++result.statistics.lost_executions;
+                else {
+                    ++result.statistics.inconclusive_executions;
+                    inconclusive.insert(std::move(text));
+                    result.statistics.distinct_inconclusive_candidates = inconclusive.size();
+                }
+                return false;
+            };
+            const auto simplest = std::clamp<std::int64_t>(0, input.request.constraints.min_value, input.request.constraints.max_value);
+            auto simplify = [&](const std::vector<std::size_t>& positions) {
+                if (positions.empty() || stopped) return;
+                auto current = result.best->values[positions.front()];
+                auto replace = [&](std::int64_t replacement) {
+                    return attempt([&](std::size_t index, std::int64_t value) -> std::optional<std::int64_t> {
+                        return std::binary_search(positions.begin(), positions.end(), index) ? replacement : value;
+                    });
+                };
+                if (current == simplest) return;
+                if (replace(simplest)) return;
+                if (stopped) return;
+                const auto unit = current < 0 ? current + 1 : current - 1;
+                if (simpler(unit, current) && replace(unit)) {
+                    current = unit;
+                    auto rejected = simplest;
+                    while (!stopped && magnitude(current) - magnitude(rejected) > 1) {
+                        const auto middle = std::midpoint(rejected, current);
+                        if (replace(middle)) current = middle;
+                        else rejected = middle;
                     }
                 }
-                if (stopped) break;
+                if (!stopped && current < 0 && current != std::numeric_limits<std::int64_t>::min()) replace(-current);
+            };
+            while (!stopped) {
+                result.statistics.round = RoundStatus::partial;
+                inconclusive.clear();
+                result.statistics.distinct_inconclusive_candidates = 0;
+                const auto starting_revision = result.best->revision;
+                for (std::size_t chunk = std::max<std::size_t>(1, result.best->values.size() / 2); chunk && !stopped; chunk /= 2) {
+                    for (std::size_t position = 0; position < result.best->values.size() && !stopped;) {
+                        const auto count = std::min(chunk, result.best->values.size() - position);
+                        if (!attempt([&](std::size_t index, std::int64_t value) -> std::optional<std::int64_t> {
+                            if (index >= position && index - position < count) return {};
+                            return value;
+                        })) position += count;
+                    }
+                }
+                // Visit distinct values in first-occurrence order. A subsequent
+                // round revisits groups changed or merged by earlier acceptances.
+                std::vector<std::int64_t> targets;
+                std::unordered_set<std::int64_t> seen;
+                for (auto value : result.best->values) {
+                    if (observe_stops()) { stopped = true; break; }
+                    if (seen.insert(value).second) targets.push_back(value);
+                }
+                for (auto target : targets) {
+                    if (stopped) break;
+                    std::vector<std::size_t> positions;
+                    for (std::size_t index = 0; index < result.best->values.size(); ++index) {
+                        if (index % 1024 == 0 && observe_stops()) { stopped = true; break; }
+                        if (result.best->values[index] == target) positions.push_back(index);
+                    }
+                    simplify(positions);
+                }
+                std::unordered_map<std::int64_t, std::size_t> frequencies;
+                for (auto value : result.best->values) {
+                    if (observe_stops()) { stopped = true; break; }
+                    ++frequencies[value];
+                }
+                for (std::size_t index = 0; index < result.best->values.size() && !stopped; ++index) {
+                    if (observe_stops()) { stopped = true; break; }
+                    const auto prior = result.best->values[index];
+                    if (frequencies[prior] < 2) continue;
+                    simplify({index});
+                    --frequencies[prior];
+                    ++frequencies[result.best->values[index]];
+                }
+                if (between_evaluations()) stopped = true;
+                if (!stopped && result.best->revision == starting_revision) {
+                    result.outcome = RunOutcome::completed;
+                    result.statistics.round = RoundStatus::complete;
+                    break;
+                }
             }
-            between_evaluations();
             if (!result.errors.empty()) result.outcome = RunOutcome::operational_stop;
             else if (result.observed_reasons.cancellation) result.outcome = RunOutcome::cancelled;
             else if (result.observed_reasons.time_limit) result.outcome = RunOutcome::time_limit;
-            else if (result.observed_reasons.evaluation_limit) result.outcome = RunOutcome::evaluation_limit;
-            else if (!stopped) result.errors.push_back({RunErrorKind::search_unavailable,
-                "removal pass exhausted; remaining reduction passes are not yet available", {}, {}});
+            else if (result.outcome != RunOutcome::completed && result.observed_reasons.evaluation_limit)
+                result.outcome = RunOutcome::evaluation_limit;
         }
         save(SaveKind::final);
         observe_stops();

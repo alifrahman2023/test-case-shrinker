@@ -1,17 +1,42 @@
 # shrink
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
-The current implementation verifies a normalized wrong-answer baseline and runs
-budgeted contiguous-chunk removal with recoverable checkpoints and progress.
+The search verifies a normalized wrong-answer baseline, then repeats contiguous-
+chunk removal, simplification of each distinct value everywhere, and individual
+simplification of repeated values. A full round with no acceptance establishes
+local irreducibility and returns status 0, including normal no-acceptance results
+and results with inconclusive checks. This does not promise the smallest failing
+input or preservation of the same underlying bug.
+
 Use `--max-evaluations 0` to verify and save only the baseline, or a positive
-budget to stop removal early (exit 4). Removal starts with floor(length / 2),
-clamped to one, sweeps left to right, stays at the same position after acceptance,
-and halves the chunk size after each sweep down to singles. A shorter tail chunk
-is tested at the end of a sweep. Invalid removals consume no evaluations.
-The remaining value-simplification passes and full irreducibility path are a
-subsequent ticket under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10).
-Exhausting removal alone saves the best input and reports an operational error
-that the remaining passes are unavailable; it does not claim completion.
+budget to bound actual candidate evaluations. Invalid candidates and the baseline
+do not consume that budget. An unfinished search returns status 4 at its limit;
+completion already established at the evaluation limit still returns 0.
+
+Removal starts with floor(length / 2), clamped to one, sweeps left to right, stays
+at the same position after acceptance, and halves chunk size down to singles.
+A shorter tail chunk is tested at the end of a sweep. Distinct values are visited
+in first-occurrence order and repeated-element positions from left to right.
+Value changes first try the permitted value closest to zero, then one unit toward
+zero; an accepted unit step enables binary search toward the simplest value.
+Negative values also try their representable positive counterpart. Arithmetic is
+safe at signed-64-bit extremes. Binary search is a threshold heuristic and can
+miss other smaller inputs for arbitrary failure predicates.
+
+Completion means that, on the exact result, every applicable strictly smaller
+single-element removal, all-occurrences value change, and individual change of a
+repeated value to simplest/unit/counterpart was invalid, lost the wrong answer,
+or was inconclusive. Distinct inconclusive serialized candidate texts count once
+per final round, separately from actual execution counts. Interrupted rounds are
+labelled partial; baseline-only runs report no round. Completed search facts
+survive a final-save error, which still requires exit status 1.
+
+For stable deterministic programs, unchanged version, inputs, constraints and
+options produce the same result bytes and accepted-input sequence. Time-limit or
+interrupted runs, near-timeout executions, and different versions are excluded.
+Without an overall budget, search continues until completion, cancellation, or
+operational error, assuming terminating candidate processing and executions; no
+practical total-runtime bound is promised.
 
 The supported baseline is macOS 15 on Apple Silicon (ARM64), using Apple Clang
 and C++20. Newer macOS versions are not rejected. Development requires Apple's
@@ -187,9 +212,9 @@ baselines show relevant exit/signal/stop facts and escaped stderr previews up to
 4 KiB, separately marking the runner's 64 KiB retention truncation. Progress appears on stderr at most once per second and includes candidate
 evaluations, acceptances, best length, and elapsed time; individual acceptances
 are not printed. Quiet mode suppresses only periodic progress and retains
-evidence, summary, and errors. A baseline-only result reports no round; removal
-reports a partial round and distinct inconclusive candidate texts. Neither
-claims irreducibility.
+evidence, summary, and errors. A baseline-only result reports no round; interrupted searches report a partial
+round. Completed results state the supported local guarantee and final-round
+inconclusive count.
 
 Resume by supplying the saved input, all required program/constraint options,
 and a different output destination, for example `--input reduced.txt --output
@@ -209,7 +234,7 @@ Baseline, acceptance, and throttled progress notifications run on the calling
 thread; acceptance events expose the current accepted input. Results retain
 baseline/current-best evidence and operational-failure evidence, with no ordinary
 candidate execution history. Statistics count actual lost/inconclusive executions
-and distinct inconclusive texts for the unfinished round.
+and distinct inconclusive texts for the complete/partial final round.
 Exceptions become typed operational errors; a throwing notifier is disabled,
 and save exceptions obey the same single-final-attempt rule. Blocked callbacks
 and filesystem operations can delay stopping. The overall sleep-inclusive budget
@@ -227,5 +252,5 @@ input and still attempts one final save, including when Ctrl-C arrives during
 saving. Status 130 denotes cancellation; observed cleanup/save/notifier errors
 require status 1 while preserving the cancellation reason and verified recovery
 state. Pending ownership remains explicit, and process exit cannot guarantee
-continued cleanup. Removal checks cancellation during generation/validation too, including
+continued cleanup. Search checks cancellation during generation/validation too, including
 invalid candidates that never launch programs. Unfinished work is discarded.
