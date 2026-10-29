@@ -18,6 +18,9 @@ struct ProgramSpec {
 struct RunLimits {
     std::chrono::milliseconds solution_timeout{2000};
     std::chrono::milliseconds reference_timeout{10000};
+    // Optional positive overall elapsed budget. Starts after preparation and
+    // uses the runner's sleep-inclusive monotonic clock. Includes baseline,
+    // search and checkpoints; cleanup/final saving may extend beyond expiry.
     std::optional<std::chrono::milliseconds> time_limit;
     std::optional<std::uint64_t> max_evaluations;
 };

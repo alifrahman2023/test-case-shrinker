@@ -84,6 +84,11 @@ int present_result(const ReductionResult& result, const std::filesystem::path& d
         execution_facts(errors, "solution", programs.solution);
         execution_facts(errors, "reference", programs.reference);
     }
+    if (result.operational_evaluation) {
+        errors << "Candidate operational failure:\n";
+        execution_facts(errors, "solution", result.operational_evaluation->execution.programs.solution);
+        execution_facts(errors, "reference", result.operational_evaluation->execution.programs.reference);
+    }
     errors << "Stopped: " << outcome_text(result.outcome) << ".\n";
     if (result.baseline.original_length) errors << "Original length: " << *result.baseline.original_length << '\n';
     if (result.best) errors << "Final length: " << result.best->values.size() << '\n';
@@ -92,9 +97,20 @@ int present_result(const ReductionResult& result, const std::filesystem::path& d
            << "; acceptances: " << result.statistics.acceptances
            << "; lost executions: " << result.statistics.lost_executions
            << "; inconclusive executions: " << result.statistics.inconclusive_executions
-           << "; elapsed: " << result.statistics.elapsed_ms << " ms\n"
-           << "No reduction round began; distinct inconclusive candidates: 0 (no round).\n"
-           << "Further reduction may be possible; irreducibility was not established.\n";
+           << "; elapsed: " << result.statistics.elapsed_ms << " ms\n";
+    if (result.statistics.round == RoundStatus::not_started)
+        errors << "No reduction round began; distinct inconclusive candidates: 0 (no round).\n";
+    else
+        errors << (result.statistics.round == RoundStatus::complete ? "Complete final round" : "Reduction round unfinished")
+               << "; distinct inconclusive candidates: " << result.statistics.distinct_inconclusive_candidates
+               << (result.statistics.round == RoundStatus::complete ? " (complete round).\n" : " (partial round).\n");
+    if (result.statistics.round == RoundStatus::complete)
+        errors << "Irreducible under supported local checks: every single-element removal; replacing all occurrences "
+                  "of each distinct value, or one occurrence of a repeated value, with the simplest allowed value, "
+                  "one unit toward zero, or its representable positive counterpart when negative. "
+                  "Every applicable strictly smaller check was invalid, lost the wrong answer, or was inconclusive.\n"
+                  "This is a local guarantee; smaller failing inputs may exist and preservation does not establish the same underlying bug.\n";
+    else errors << "Further reduction may be possible; irreducibility was not established.\n";
     if (result.saving.last_saved_revision) errors << "Saved revision " << *result.saving.last_saved_revision << ": " << destination << '\n';
     if (!result.best) {
         std::error_code ignored;
@@ -115,7 +131,7 @@ int present_result(const ReductionResult& result, const std::filesystem::path& d
     errors << "Final save: " << (result.saving.final_outcome == FinalSaveOutcome::succeeded ? "succeeded"
         : result.saving.final_outcome == FinalSaveOutcome::failed ? "failed" : "not attempted") << '\n';
     for (const auto& failure : result.saving.failures) {
-        errors << "Save error (" << (failure.kind == SaveKind::initial ? "initial" : "final") << "): "
+        errors << "Save error (" << (failure.kind == SaveKind::initial ? "initial" : failure.kind == SaveKind::periodic ? "periodic" : "final") << "): "
                << failure.error.operation << " (" << (failure.error.path.empty() ? destination : failure.error.path) << ')';
         if (failure.error.system_error) errors << ": " << failure.error.system_error.message();
         errors << '\n';

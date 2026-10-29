@@ -1,12 +1,58 @@
 # shrink
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
-The current implementation validates requests, verifies a normalized wrong-answer
-baseline, saves it safely, and reports execution and disagreement evidence.
-Use `--max-evaluations 0` for this baseline-only slice. Candidate search remains a
-subsequent ticket under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10);
-a verified invocation with a nonzero or omitted candidate budget saves its
-baseline and reports an operational error explaining that search is unavailable.
+The search verifies a normalized wrong-answer baseline, then repeats contiguous-
+chunk removal, simplification of each distinct value everywhere, and individual
+simplification of repeated values. A full round with no acceptance establishes
+local irreducibility and returns status 0, including normal no-acceptance results
+and results with inconclusive checks. This does not promise the smallest failing
+input or preservation of the same underlying bug.
+
+Use `--max-evaluations 0` to verify and save only the baseline, or a positive
+budget to bound actual candidate evaluations. Invalid candidates and the baseline
+do not consume that budget. An unfinished search returns status 4 at its limit;
+completion already established at the evaluation limit still returns 0.
+
+Removal starts with floor(length / 2), clamped to one, sweeps left to right, stays
+at the same position after acceptance, and halves chunk size down to singles.
+A shorter tail chunk is tested at the end of a sweep. Distinct values are visited
+in first-occurrence order and repeated-element positions from left to right.
+Value changes first try the permitted value closest to zero, then one unit toward
+zero; an accepted unit step enables binary search toward the simplest value.
+Negative values also try their representable positive counterpart. Arithmetic is
+safe at signed-64-bit extremes. Binary search is a threshold heuristic and can
+miss other smaller inputs for arbitrary failure predicates.
+
+Completion means that, on the exact result, every applicable strictly smaller
+single-element removal, all-occurrences value change, and individual change of a
+repeated value to simplest/unit/counterpart was invalid, lost the wrong answer,
+or was inconclusive. Distinct inconclusive serialized candidate texts count once
+per final round, separately from actual execution counts. Interrupted rounds are
+labelled partial; baseline-only runs report no round. Completed search facts
+survive a final-save error, which still requires exit status 1.
+
+For stable deterministic programs, unchanged version, inputs, constraints and
+options produce the same result bytes and accepted-input sequence. Time-limit or
+interrupted runs, near-timeout executions, and different versions are excluded.
+Without an overall budget, search continues until completion, cancellation, or
+operational error, assuming terminating candidate processing and executions; no
+practical total-runtime bound is promised.
+
+Each invocation caches only ordinary lost/inconclusive candidate outcomes in
+memory. Fingerprints index candidates, but exact normalized text decides reuse,
+so collisions cannot skip preserving candidates. Accepted inputs, operational
+errors and unfinished evaluations are never cached. FIFO eviction bounds retained
+candidate text to 8 MiB and entries to 4,096; oversized candidates execute without
+being cached. The cache stores normalized identities and classifications, without execution
+evidence. It does not persist across invocations or resume.
+
+Cache hits and invalid candidates consume no evaluation budget. Actual execution
+counts remain separate from distinct inconclusive texts in the current/final
+round, including cached outcomes. Completed runs with caching disabled or entries
+evicted retain the same result and accepted-input sequence; budget-limited runs
+can stop at different inputs because they perform different amounts of work.
+Cache disable/size/fingerprint controls are internal test controls; there is no
+public cache flag.
 
 The supported baseline is macOS 15 on Apple Silicon (ARM64), using Apple Clang
 and C++20. Newer macOS versions are not rejected. Development requires Apple's
@@ -161,7 +207,12 @@ shrink --input failing.txt --solution ./solution --reference ./reference \
 ```
 
 The CLI always supplies saving. After verification it saves the normalized
-baseline, then attempts exactly one final save on stopping, even when unchanged
+baseline, marks accepted revisions pending, and checkpoints the latest best between
+evaluations once at least one second has elapsed since the previous successful
+save. Multiple acceptances coalesce; unchanged input is not periodically rewritten.
+This throttles I/O and does not promise a maximum recovery gap. Initial or periodic
+save failures stop search and retain their error even after a successful final
+retry. The CLI attempts exactly one final save on stopping, even when unchanged
 or the initial save failed. Each save writes a temporary file beside the output
 and renames it over the destination, without fsync. Write/replacement failure
 leaves the previous destination intact; this does not promise power-loss or OS
@@ -174,9 +225,12 @@ Baseline and final evidence show both successful executions, the first differing
 token, and escaped bounded token previews (including end of output). Evidence is
 retained from verification; no extra final evaluation is performed. Failed
 baselines show relevant exit/signal/stop facts and escaped stderr previews up to
-4 KiB, separately marking the runner's 64 KiB retention truncation. Quiet mode
-retains evidence, summary, and errors. A baseline-only result claims no
-irreducibility and reports that no reduction round began.
+4 KiB, separately marking the runner's 64 KiB retention truncation. Progress appears on stderr at most once per second and includes candidate
+evaluations, acceptances, best length, and elapsed time; individual acceptances
+are not printed. Quiet mode suppresses only periodic progress and retains
+evidence, summary, and errors. A baseline-only result reports no round; interrupted searches report a partial
+round. Completed results state the supported local guarantee and final-round
+inconclusive count.
 
 Resume by supplying the saved input, all required program/constraint options,
 and a different output destination, for example `--input reduced.txt --output
@@ -188,15 +242,40 @@ The internal synchronous `reduce` boundary takes an owning `ReductionRequest`, a
 caller-owned `Runner`, a cancellation token, and optional `RunHooks`. Results own
 baseline/best evidence, typed errors, counts, observed stop reasons, and saving
 state; no CLI exit integers cross that boundary. Omitting the save hook returns
-an explicitly unsaved in-memory result. Initial/final save requests include the
+an explicitly unsaved in-memory result. Initial/periodic/final save requests include the
 normalized bytes, revision, and save kind. Callback objects live through the
 call, run on the calling thread, return promptly, and must not reenter the
 runner. Borrowed arguments live only through that callback; copy retained data.
+Baseline, acceptance, and throttled progress notifications run on the calling
+thread; acceptance events expose the current accepted input. Results retain
+baseline/current-best evidence and operational-failure evidence, with no ordinary
+candidate execution history. Statistics count actual lost/inconclusive executions
+and distinct inconclusive texts for the complete/partial final round.
 Exceptions become typed operational errors; a throwing notifier is disabled,
 and save exceptions obey the same single-final-attempt rule. Blocked callbacks
 and filesystem operations can delay stopping. The overall sleep-inclusive budget
 starts immediately before verification and includes callback/save time; cleanup
 and final saving can extend beyond it.
+
+`--time-limit` accepts a positive whole duration with `ms` or `s`; no overall
+limit is enabled by default. Timing starts after request validation and input
+normalization, immediately before baseline execution. Native timing uses
+`mach_continuous_time`, which includes computer sleep and is unaffected by
+calendar-clock adjustments. The elapsed budget includes candidate generation,
+validation, cache work, program execution and initial/periodic saves. Observing
+elapsed time equal to the limit expires unfinished work, which is discarded
+without acceptance or caching.
+
+Overall expiry stops both active programs through the runner's normal bounded
+cleanup. It remains distinct from caller cancellation and per-program timeouts,
+including pending-setup errors. Before verification it returns status 4 with no
+verified recovery input and leaves the destination unchanged. After verification
+it retains the best and attempts one final save, with partial/no-round counts
+and no irreducibility claim. Operational errors require status 1 while retaining
+observed time/cancellation reasons. Cleanup and final saving may exceed the
+budget; completed-search guarantees survive expiry during final saving. These
+are prompt checks when scheduled, without hard callback, filesystem or kernel
+operation bounds.
 
 Ctrl-C handling belongs to the terminal adapter, which records SIGINT in a
 signal-safe flag and checks it from ordinary code. Supplied programs run in
@@ -209,5 +288,5 @@ input and still attempts one final save, including when Ctrl-C arrives during
 saving. Status 130 denotes cancellation; observed cleanup/save/notifier errors
 require status 1 while preserving the cancellation reason and verified recovery
 state. Pending ownership remains explicit, and process exit cannot guarantee
-continued cleanup. Candidate-processing cancellation uses this same contract in
-the later search slice.
+continued cleanup. Search checks cancellation during generation/validation too, including
+invalid candidates that never launch programs. Unfinished work is discarded.

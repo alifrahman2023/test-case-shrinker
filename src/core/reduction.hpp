@@ -1,6 +1,7 @@
 #pragma once
 
 #include "evaluator.hpp"
+#include "cache_controls.hpp"
 #include <functional>
 #include <system_error>
 
@@ -10,7 +11,7 @@ enum class RunOutcome { invalid_request, baseline_rejected, completed, evaluatio
 enum class RoundStatus { not_started, partial, complete };
 enum class BaselineStatus { not_run, interrupted, agreement, solution_unsuccessful,
                             reference_unsuccessful, operational_failure, verified };
-enum class RunErrorKind { validation, runner, cleanup, save, notification, search_unavailable };
+enum class RunErrorKind { validation, runner, cleanup, save, notification };
 struct RunError {
     RunErrorKind kind;
     std::string operation;
@@ -60,7 +61,7 @@ struct SaveSummary {
     FinalSaveOutcome final_outcome = FinalSaveOutcome::not_attempted;
     std::vector<SaveFailure> failures;
 };
-enum class RunEventKind { baseline_verified };
+enum class RunEventKind { baseline_verified, acceptance, progress };
 struct RunEvent { RunEventKind kind; const VerifiedInput& best; const RunStatistics& statistics; };
 // Callbacks execute synchronously on the calling thread. Keep them alive for
 // the call, return promptly, and do not reenter the runner. Arguments borrow
@@ -80,11 +81,12 @@ struct ReductionResult {
     RunOutcome outcome = RunOutcome::operational_stop;
     std::optional<VerifiedInput> best;
     BaselineRecord baseline;
+    std::shared_ptr<const Evaluation> operational_evaluation;
     RunStatistics statistics;
     std::vector<RunError> errors;
     SaveSummary saving;
     std::vector<PendingOwnership> pending_ownership;
 };
 ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationToken cancellation = {},
-                       const RunHooks& hooks = {});
+                       const RunHooks& hooks = {}, const detail::CacheControls& cache = {});
 }

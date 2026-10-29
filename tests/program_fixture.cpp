@@ -6,6 +6,8 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
+#include <cstdint>
+#include <unordered_set>
 
 namespace {
 void emit(std::ostream& stream, std::size_t size, char byte) {
@@ -18,6 +20,37 @@ int main(int argc, char** argv) {
     if (argc < 2) return 99;
     const std::string mode = argv[1];
     if (mode == "text" && argc == 3) std::cout << argv[2];
+    else if (mode == "duplicate-bug" || mode == "original-pair-reference") {
+        std::size_t length; std::cin >> length;
+        std::unordered_set<std::int64_t> seen;
+        bool duplicate = false;
+        bool original_pair = length == 2;
+        for (std::size_t index = 0; index < length; ++index) {
+            std::int64_t value; if (!(std::cin >> value)) return 95;
+            if (!seen.insert(value).second) duplicate = true;
+            if (value != 5) original_pair = false;
+        }
+        if (mode == "original-pair-reference") {
+            if (!original_pair) return 7;
+            std::cout << "2";
+        } else std::cout << (duplicate ? "duplicate" : "ok");
+    }
+    else if (mode == "wait-below-length" && argc == 5) {
+        std::size_t length = 0; if (!(std::cin >> length)) return 95;
+        for (std::size_t index = 0; index < length; ++index) {
+            std::int64_t value; if (!(std::cin >> value)) return 95;
+        }
+        if (length >= std::stoull(argv[4])) std::cout << argv[3];
+        else {
+            signal(SIGINT, SIG_IGN);
+            { std::ofstream ready(argv[2]); ready << getpid() << ' ' << getpgrp(); }
+            for (;;) pause();
+        }
+    }
+    else if (mode == "slow-text" && argc == 4) {
+        usleep(static_cast<useconds_t>(std::stoul(argv[2]) * 1000));
+        std::cout << argv[3];
+    }
     else if (mode == "record-input" && argc == 4) {
         std::ofstream record(argv[2], std::ios::binary | std::ios::app);
         record << std::cin.rdbuf();

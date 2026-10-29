@@ -1,6 +1,7 @@
 #include "cli.hpp"
 #include "saving.hpp"
 #include "options.hpp"
+#include "runner_backend.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -393,10 +394,11 @@ TEST_CASE("CLI leaves an existing default output unchanged on rejection", "[cli]
 
 namespace {
 std::vector<std::string> fixture_arguments(const Workspace& workspace, const std::vector<std::string>& solution,
-                                          const std::vector<std::string>& reference) {
+                                          const std::vector<std::string>& reference,
+                                          std::optional<std::uint64_t> budget = 0) {
     auto arguments = workspace.arguments();
     arguments[3] = SHRINK_PROGRAM_FIXTURE; arguments[5] = SHRINK_PROGRAM_FIXTURE;
-    arguments.push_back("--max-evaluations=0");
+    if (budget) arguments.push_back("--max-evaluations=" + std::to_string(*budget));
     for (const auto& argument : solution) arguments.push_back("--solution-arg=" + argument);
     for (const auto& argument : reference) arguments.push_back("--reference-arg=" + argument);
     return arguments;
@@ -639,4 +641,217 @@ TEST_CASE("CLI caps stderr preview after escaping control bytes", "[cli-baseline
     REQUIRE(text.find("\\x01") != std::string::npos);
     REQUIRE(text.find("[presentation truncated]") != std::string::npos);
     REQUIRE(text.find("retention truncated at 64 KiB") != std::string::npos);
+}
+TEST_CASE("CLI budgeted removal saves smaller evidence and resume verifies with distinct destination", "[cli-removal]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"}, 1);
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(output.str().empty());
+    REQUIRE(workspace.read("result.txt") == "2\n-2 7\n");
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n");
+    REQUIRE(errors.str().find("Reduction round unfinished") != std::string::npos);
+    REQUIRE(errors.str().find("candidate evaluations: 1; acceptances: 1") != std::string::npos);
+    REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+    arguments[1] = "result.txt"; arguments[15] = "resumed.txt";
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+    REQUIRE(workspace.read("result.txt") == "2\n-2 7\n");
+    REQUIRE(workspace.read("resumed.txt") == "1\n7\n");
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n2\n-2 7\n1\n7\n");
+}
+TEST_CASE("CLI throttles progress and quiet retains evidence summary and saved result", "[cli-removal]") {
+    Workspace workspace;
+    for (bool quiet : {false, true}) {
+        auto arguments = fixture_arguments(workspace, {"slow-text", "600", "1"}, {"text", "2"}, 2);
+        if (quiet) arguments.push_back("--quiet");
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 4);
+        REQUIRE(output.str().empty());
+        REQUIRE(workspace.read("result.txt") == "1\n7\n");
+        auto progress = errors.str().find("Progress:");
+        REQUIRE((progress == std::string::npos) == quiet);
+        if (!quiet) {
+            std::istringstream lines(errors.str());
+            std::string line;
+            std::uint64_t previous = 0;
+            while (std::getline(lines, line)) {
+                if (!line.starts_with("Progress:")) continue;
+                REQUIRE(line.find("evaluations ") != std::string::npos);
+                REQUIRE(line.find("; acceptances ") != std::string::npos);
+                REQUIRE(line.find("; best length ") != std::string::npos);
+                const auto marker = line.find("; elapsed ");
+                REQUIRE(marker != std::string::npos);
+                const auto elapsed = std::stoull(line.substr(marker + 10));
+                REQUIRE(elapsed - previous >= 1000);
+                previous = elapsed;
+            }
+        }
+        REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+        REQUIRE(errors.str().find("candidate evaluations: 2; acceptances: 2") != std::string::npos);
+    }
+}
+TEST_CASE("CLI failed final replacement recovers full reduced best and retains saved baseline", "[cli-removal]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"text", "2"}, 1);
+    shrink::cli::InvocationServices services;
+    services.save = [](const fs::path& path, const shrink::SaveRequest& save) {
+        shrink::cli::SaveFileOperations operations;
+        if (save.kind == shrink::SaveKind::final)
+            operations.rename = [](const char*, const char*) { errno = EACCES; return -1; };
+        return shrink::cli::save_atomic(path, save, operations);
+    };
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 1);
+    REQUIRE(output.str() == "2\n-2 7\n");
+    REQUIRE(workspace.read("result.txt") == "3\n7 -2 7\n");
+    REQUIRE(errors.str().find("Saved revision 1:") != std::string::npos);
+    REQUIRE(errors.str().find("Final save: failed") != std::string::npos);
+    REQUIRE(errors.str().find("Observed: evaluation limit") != std::string::npos);
+}
+TEST_CASE("CLI unrestricted search completes with a precise local guarantee and reused final evidence", "[cli-values]") {
+    Workspace workspace;
+    auto arguments = fixture_arguments(workspace, {"record-input", "solution-input", "1"}, {"record-input", "reference-input", "2"}, std::nullopt);
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 0);
+    REQUIRE(workspace.read("result.txt") == "0\n\n");
+    REQUIRE(output.str().empty());
+    REQUIRE(errors.str().find("Complete final round") != std::string::npos);
+    REQUIRE(errors.str().find("Irreducible under supported local checks") != std::string::npos);
+    REQUIRE(errors.str().find("every single-element removal") != std::string::npos);
+    REQUIRE(errors.str().find("one occurrence of a repeated value") != std::string::npos);
+    REQUIRE(errors.str().find("first differing token: 1") != std::string::npos);
+    REQUIRE(errors.str().find("irreducibility was not established") == std::string::npos);
+    REQUIRE(workspace.read("solution-input") == "3\n7 -2 7\n2\n-2 7\n1\n7\n0\n\n");
+}
+TEST_CASE("CLI simplifies duplicate failures and retains completed guarantee when final saving fails", "[cli-values]") {
+    Workspace workspace;
+    workspace.write("original input.txt", "3 42 7 42");
+    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"}, std::nullopt);
+    for (bool fail_final : {false, true}) {
+        shrink::cli::InvocationServices services;
+        services.save = [fail_final](const fs::path& path, const shrink::SaveRequest& save) {
+            shrink::cli::SaveFileOperations operations;
+            if (fail_final && save.kind == shrink::SaveKind::final)
+                operations.rename = [](const char*, const char*) { errno = EACCES; return -1; };
+            return shrink::cli::save_atomic(path, save, operations);
+        };
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == (fail_final ? 1 : 0));
+        REQUIRE(output.str() == (fail_final ? "2\n0 0\n" : ""));
+        REQUIRE(errors.str().find("Complete final round") != std::string::npos);
+        REQUIRE(errors.str().find("Irreducible under supported local checks") != std::string::npos);
+        REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+        REQUIRE(workspace.read("result.txt") == (fail_final ? "3\n42 7 42\n" : "2\n0 0\n"));
+    }
+}
+TEST_CASE("CLI completed cache modes preserve real-program result and counts without a cache flag", "[cli-cache]") {
+    Workspace workspace;
+    workspace.write("original input.txt", "3 42 7 42");
+    auto arguments = fixture_arguments(workspace, {"duplicate-bug"}, {"text", "ok"}, std::nullopt);
+    std::uint64_t uncached_evaluations = 0;
+    for (const auto& cache : std::vector<shrink::detail::CacheControls>{
+        {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}, {.max_text_bytes = 4}}) {
+        shrink::cli::InvocationServices services; services.cache = cache;
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 0);
+        REQUIRE(output.str().empty());
+        REQUIRE(workspace.read("result.txt") == "2\n0 0\n");
+        REQUIRE(errors.str().find("Complete final round; distinct inconclusive candidates: 0") != std::string::npos);
+        REQUIRE(errors.str().find("acceptances: 2") != std::string::npos);
+        REQUIRE(errors.str().find("Final: both programs succeeded") != std::string::npos);
+        const std::string label = "candidate evaluations: ";
+        auto marker = errors.str().find(label); REQUIRE(marker != std::string::npos);
+        const auto evaluations = std::stoull(errors.str().substr(marker + label.size()));
+        if (!cache.enabled) uncached_evaluations = evaluations;
+        else REQUIRE(evaluations <= uncached_evaluations);
+    }
+    arguments.push_back("--cache=false");
+    std::ostringstream output, errors;
+    REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors) == 2);
+}
+TEST_CASE("CLI cached inconclusive checks retain exact uncertainty counts with fewer executions", "[cli-cache]") {
+    Workspace workspace;
+    workspace.write("original input.txt", "2 5 5");
+    auto arguments = fixture_arguments(workspace, {"text", "1"}, {"original-pair-reference"}, std::nullopt);
+    for (const auto& cache : std::vector<shrink::detail::CacheControls>{
+        {.enabled = false}, {}, {.forced_fingerprint = 0}, {.max_entries = 1, .forced_fingerprint = 0}}) {
+        shrink::cli::InvocationServices services; services.cache = cache;
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == 0);
+        REQUIRE(workspace.read("result.txt") == "2\n5 5\n");
+        REQUIRE(output.str().empty());
+        REQUIRE(errors.str().find("Complete final round; distinct inconclusive candidates: 7") != std::string::npos);
+        REQUIRE(errors.str().find(cache.enabled ? "candidate evaluations: 7; acceptances: 0" : "candidate evaluations: 8; acceptances: 0") != std::string::npos);
+        REQUIRE(errors.str().find(cache.enabled ? "inconclusive executions: 7" : "inconclusive executions: 8") != std::string::npos);
+    }
+}
+namespace {
+// Run real programs, then simulate sleep reaching the exact overall deadline
+// only after both readiness records are complete. Cleanup uses real elapsed
+// time after the jump. No assumed startup time or short sleep determines order.
+class ReadyDeadlineClock final : public shrink::detail::ExecutionBackend {
+public:
+    std::unique_ptr<shrink::detail::ExecutionBackend> native = shrink::detail::make_mac_execution_backend();
+    std::optional<std::uint64_t> jumped_at;
+    std::vector<pid_t> children;
+    std::vector<shrink::ProgramRole> stops;
+    std::uint64_t now_ms() override {
+        const auto now = native->now_ms();
+        if (!jumped_at) {
+            pid_t solution = 0, reference = 0;
+            std::ifstream left("solution-ready"), right("reference-ready");
+            if (!(left >> solution) || !(right >> reference) || solution <= 0 || reference <= 0) return 0;
+            jumped_at = now;
+        }
+        return 1000 + now - *jumped_at;
+    }
+    std::optional<shrink::RunnerError> launch(shrink::ProgramRole role, const shrink::ProgramSpec& program, std::string_view input) override {
+        auto error = native->launch(role, program, input);
+        if (const auto pid = native->process_id(role)) children.push_back(*pid);
+        return error;
+    }
+    std::vector<shrink::detail::ExecutionEvent> service(shrink::CancellationToken cancellation, int wait_ms) override {
+        return native->service(cancellation, wait_ms);
+    }
+    std::optional<shrink::RunnerError> stop(shrink::ProgramRole role) override { stops.push_back(role); return native->stop(role); }
+    bool pending(shrink::ProgramRole role) const override { return native->pending(role); }
+    std::optional<int> process_id(shrink::ProgramRole role) const override { return native->process_id(role); }
+    shrink::PendingOwnership ownership(shrink::ProgramRole role) const override { return native->ownership(role); }
+};
+}
+TEST_CASE("CLI overall expiry terminates both real programs and retains only verified recovery", "[cli-time-limit]") {
+    struct Case { bool verified; bool fail_final; };
+    for (const auto& test : {Case{false, false}, Case{true, false}, Case{true, true}}) {
+        const auto verified = test.verified;
+        Workspace workspace;
+        const std::string threshold = verified ? "3" : "4";
+        auto arguments = fixture_arguments(workspace, {"wait-below-length", "solution-ready", "1", threshold},
+                                                      {"wait-below-length", "reference-ready", "2", threshold}, std::nullopt);
+        arguments.insert(arguments.end(), {"--time-limit=1s", "--solution-timeout=10s", "--reference-timeout=10s"});
+        auto backend = std::make_unique<ReadyDeadlineClock>(); auto* observed = backend.get();
+        shrink::Runner runner(std::move(backend));
+        shrink::cli::InvocationServices services; services.runner = &runner;
+        services.save = [&](const fs::path& path, const shrink::SaveRequest& save) -> shrink::SaveResult {
+            if (test.fail_final && save.kind == shrink::SaveKind::final)
+                return shrink::SaveError{shrink::SaveErrorCode::replace, "final save after expiry", path, std::make_error_code(std::errc::permission_denied)};
+            return shrink::cli::save_atomic(path, save);
+        };
+        std::ostringstream output, errors;
+        REQUIRE(shrink::cli::run(Workspace::views(arguments), output, errors, services) == (test.fail_final ? 1 : 4));
+        REQUIRE(observed->jumped_at);
+        REQUIRE(observed->stops == std::vector{shrink::ProgramRole::solution, shrink::ProgramRole::reference});
+        REQUIRE_FALSE(runner.has_pending_ownership());
+        REQUIRE(observed->children.size() == (verified ? 4 : 2));
+        for (auto child : observed->children) {
+            int status = 0;
+            REQUIRE(waitpid(child, &status, WNOHANG) == -1);
+            REQUIRE(errno == ECHILD);
+        }
+        REQUIRE(output.str() == (test.fail_final ? "3\n7 -2 7\n" : ""));
+        REQUIRE(workspace.read("result.txt") == (verified ? "3\n7 -2 7\n" : "previous result\n"));
+        REQUIRE(errors.str().find("Observed: overall time limit") != std::string::npos);
+        REQUIRE(errors.str().find("Observed: caller cancellation") == std::string::npos);
+        REQUIRE(errors.str().find("irreducibility was not established") != std::string::npos);
+        REQUIRE(errors.str().find(verified ? "Final: both programs succeeded" : "No verified result was produced") != std::string::npos);
+    }
 }
