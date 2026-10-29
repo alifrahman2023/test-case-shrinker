@@ -3,6 +3,7 @@
 #include "coordinator.hpp"
 
 #include <array>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <atomic>
@@ -13,10 +14,22 @@ namespace shrink {
 // Copyable caller-owned cancellation; runner waits are intercepted within 5 ms.
 class CancellationToken {
 public:
-    bool stop_requested() const { return requested_ && requested_->load(); }
+    bool stop_requested() const {
+        return (requested_ && requested_->load()) || (stop_check_ && stop_check_());
+    }
+    // Internal synchronous polling adapter for a host signal/deadline. The
+    // predicate must not throw; captures live through every use of this token.
+    CancellationToken with_stop_check(std::function<bool()> check) const {
+        auto token = *this;
+        token.stop_check_ = [prior = stop_check_, check = std::move(check)] {
+            return (prior && prior()) || check();
+        };
+        return token;
+    }
 private:
     friend class CancellationSource;
     std::shared_ptr<std::atomic<bool>> requested_;
+    std::function<bool()> stop_check_;
 };
 class CancellationSource {
 public:
@@ -107,6 +120,8 @@ public:
     ExecutionPair run(std::string_view normalized_input, const ProgramSpec& solution,
                       const ProgramSpec& reference, const RunLimits& limits,
                       CancellationToken cancellation = {});
+    // Internal shared sleep-inclusive clock for reduction budgets/statistics.
+    std::uint64_t now_ms() const;
     bool has_pending_ownership() const;
     std::vector<PendingOwnership> pending_ownership() const;
     // Retry only existing ownership: never launches programs. One shared wait

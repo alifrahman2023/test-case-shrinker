@@ -18,6 +18,15 @@ int main(int argc, char** argv) {
     if (argc < 2) return 99;
     const std::string mode = argv[1];
     if (mode == "text" && argc == 3) std::cout << argv[2];
+    else if (mode == "record-input" && argc == 4) {
+        std::ofstream record(argv[2], std::ios::binary | std::ios::app);
+        record << std::cin.rdbuf();
+        if (!record) return 96;
+        std::cout << argv[3];
+    }
+    else if (mode == "fail-stderr" && argc == 3) {
+        emit(std::cerr, std::stoull(argv[2]), 'e'); return 7;
+    }
     else if (mode == "emit" && argc == 4) {
         emit(std::cout, std::stoull(argv[2]), 'x');
         emit(std::cerr, std::stoull(argv[3]), 'e');

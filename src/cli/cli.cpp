@@ -1,12 +1,15 @@
 #include "cli.hpp"
 #include "options.hpp"
 #include "version.hpp"
+#include "reduction.hpp"
+#include "saving.hpp"
+#include "presentation.hpp"
 
 #include <ostream>
 
 namespace shrink::cli {
 int run(std::span<const std::string_view> arguments, std::ostream& output,
-        std::ostream& errors) {
+        std::ostream& errors, const InvocationServices& services) {
     if (arguments.size() == 1 && arguments.front() == "--help") {
         output << "Usage: shrink [options]\n"
                   "\n"
@@ -32,7 +35,7 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
                   "Value options accept --option value or --option=value. Program arguments\n"
                   "beginning with '-' require the equals form. No shell interpretation.\n"
                   "Programs must be deterministic and create no descendant processes.\n"
-                  "This build validates requests; program execution is not yet available.\n";
+                  "Use --max-evaluations 0 to verify and save a baseline; search is not yet available.\n";
         return output ? 0 : 1;
     }
     if (arguments.size() == 1 && arguments.front() == "--version") {
@@ -46,8 +49,18 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
         errors << ": " << error->message << "\nNo verified result was produced; output was left unchanged.\n";
         return error->kind == PreparationErrorKind::invalid_configuration ? 2 : 1;
     }
-    errors << "Input validated. Program execution is not yet available in this build.\n"
-              "No verified result was produced; output was left unchanged.\n";
-    return 1;
+    auto invocation = std::get<Invocation>(std::move(prepared));
+    auto owned_runner = services.runner ? std::unique_ptr<Runner>{} : std::make_unique<Runner>();
+    auto& runner = services.runner ? *services.runner : *owned_runner;
+    RunHooks hooks;
+    hooks.save = [&](const SaveRequest& save) {
+        return services.save ? services.save(invocation.output_path, save) : save_atomic(invocation.output_path, save);
+    };
+    auto result = reduce(std::move(invocation.core.request), runner, services.cancellation, hooks);
+    // The terminal adapter returns to main and exits after reporting unresolved
+    // ownership. Keep that runner alive until process exit rather than invoking
+    // its destructor contract check. Continuing hosts supply their own runner.
+    if (owned_runner && runner.has_pending_ownership()) (void)owned_runner.release();
+    return present_result(result, invocation.output_path, output, errors);
 }
 }

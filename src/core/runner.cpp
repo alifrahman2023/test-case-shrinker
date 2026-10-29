@@ -323,6 +323,8 @@ bool Runner::collect_event(ExecutionEvidence& evidence, OutputCollection& collec
     return overflow;
 }
 
+std::uint64_t Runner::now_ms() const { return backend_->now_ms(); }
+
 CleanupResult Runner::cleanup(std::chrono::milliseconds wait, CancellationToken cancellation) {
     CleanupResult result;
     if (wait.count() < 0 || wait.count() > 1000) {

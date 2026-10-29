@@ -1,8 +1,12 @@
 # shrink
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
-The current implementation provides `--help`, `--version`, and request/input/file
-validation. The internal core also evaluates wrong-answer candidates with concurrent, bounded programs; CLI execution and reduction remain subsequent tickets under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10).
+The current implementation validates requests, verifies a normalized wrong-answer
+baseline, saves it safely, and reports execution and disagreement evidence.
+Use `--max-evaluations 0` for this baseline-only slice. Candidate search remains a
+subsequent ticket under the [approved spec](https://github.com/alifrahman2023/test-case-shrinker/issues/10);
+a verified invocation with a nonzero or omitted candidate budget saves its
+baseline and reports an operational error explaining that search is unavailable.
 
 The supported baseline is macOS 15 on Apple Silicon (ARM64), using Apple Clang
 and C++20. Newer macOS versions are not rejected. Development requires Apple's
@@ -77,8 +81,12 @@ return status 2 before executing either program or changing any result file.
 Input-read failures return status 1. Ordinary stdout stays empty, and diagnostics
 go to stderr. The core exposes typed validation errors; the CLI file adapter
 retains operation, path, and system-error details for file I/O failures.
-A valid invocation currently returns status 1 with an explicit execution-unavailable
-message. It creates no verified result until baseline evaluation is implemented.
+A zero candidate budget still verifies the baseline exactly once, using only its
+normalized layout. Both programs must succeed, disagree on exact output tokens,
+and finish cleanup. Agreement or unsuccessful execution returns status 3 without
+changing the output. Runner, cleanup, save, and callback errors return status 1;
+overall time limits return 4 and Ctrl-C returns 130 unless an operational error
+also occurred. No verified recovery input exists before successful verification.
 
 Input and output must be regular files (a new output is allowed), and the output
 parent must exist. Input and executable symlinks are permitted; output symlinks
@@ -136,10 +144,56 @@ exit; users need not keep it open indefinitely. CLI exit or a hard kill cannot
 guarantee continued cleanup or termination of unresolved children. No background
 manager, process-tree traversal, descendant detection, or sandbox is provided.
 Supplied programs must create no descendants; threads remain permitted under
-the determinism prerequisite. The CLI does not yet invoke this evaluator.
+the determinism prerequisite. The CLI uses this evaluator for baseline verification.
 
 Run the native execution and controlled clock/event groups with:
 
 ```sh
 build/debug/shrink_core_tests '[runner],[execution-events]'
 ```
+
+Verify and save a baseline (status 4 means the requested evaluation limit):
+
+```sh
+shrink --input failing.txt --solution ./solution --reference ./reference \
+  --min-length 0 --max-length 100000 --min-value=-1000000000 \
+  --max-value 1000000000 --max-evaluations 0 --output reduced.txt
+```
+
+The CLI always supplies saving. After verification it saves the normalized
+baseline, then attempts exactly one final save on stopping, even when unchanged
+or the initial save failed. Each save writes a temporary file beside the output
+and renames it over the destination, without fsync. Write/replacement failure
+leaves the previous destination intact; this does not promise power-loss or OS
+crash durability. Any save failure remains an operational error after a successful
+final retry. Final-save failure attempts the complete normalized best input on
+stdout and reports file and stdout-recovery errors on stderr. Ordinary stdout
+otherwise stays empty.
+
+Baseline and final evidence show both successful executions, the first differing
+token, and escaped bounded token previews (including end of output). Evidence is
+retained from verification; no extra final evaluation is performed. Failed
+baselines show relevant exit/signal/stop facts and escaped stderr previews up to
+4 KiB, separately marking the runner's 64 KiB retention truncation. Quiet mode
+retains evidence, summary, and errors. A baseline-only result claims no
+irreducibility and reports that no reduction round began.
+
+Resume by supplying the saved input, all required program/constraint options,
+and a different output destination, for example `--input reduced.txt --output
+reduced-again.txt --max-evaluations 0`. This performs fresh verification and
+restores no search/cache state. Input/output aliases are rejected even when the
+output is the default `reduced.txt`.
+
+The internal synchronous `reduce` boundary takes an owning `ReductionRequest`, a
+caller-owned `Runner`, a cancellation token, and optional `RunHooks`. Results own
+baseline/best evidence, typed errors, counts, observed stop reasons, and saving
+state; no CLI exit integers cross that boundary. Omitting the save hook returns
+an explicitly unsaved in-memory result. Initial/final save requests include the
+normalized bytes, revision, and save kind. Callback objects live through the
+call, run on the calling thread, return promptly, and must not reenter the
+runner. Borrowed arguments live only through that callback; copy retained data.
+Exceptions become typed operational errors; a throwing notifier is disabled,
+and save exceptions obey the same single-final-attempt rule. Blocked callbacks
+and filesystem operations can delay stopping. The overall sleep-inclusive budget
+starts immediately before verification and includes callback/save time; cleanup
+and final saving can extend beyond it.
