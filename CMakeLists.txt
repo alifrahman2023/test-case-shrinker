@@ -65,6 +65,14 @@ if(BUILD_TESTING)
             "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/cli-check"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_information.cmake")
 
+    add_test(NAME source_installation
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_DIRECTORY=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DCHECK_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/source-installation"
+            "-DDEMO_BUILD_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/packaging/check-source.cmake")
+    set_tests_properties(source_installation PROPERTIES TIMEOUT 180)
+
     foreach(demo IN ITEMS duplicates width)
         foreach(role IN ITEMS solution reference)
             add_executable(demo_${demo}_${role} examples/${demo}/${role}.cpp)

@@ -1,6 +1,9 @@
 # shrink
 
 A native macOS CLI for reducing wrong-answer integer-array inputs.
+For tagged-source Homebrew and manual installation, see [INSTALL.md](INSTALL.md).
+The first release tag is pending author approval; verification and publication
+steps are in [RELEASING.md](RELEASING.md).
 For two complete runnable examples, see [the demonstrations](examples/README.md):
 a duplicate-handling bug and an arithmetic-width bug with defined unsigned wrap.
 
@@ -109,7 +112,12 @@ installed CLI-only Release check on the named `macos-15` ARM64 runner. New tests
 must be registered with CTest so this same job covers subsequent slices.
 The `macOS 15 ARM64 Debug and installed Release` check must pass before merging
 or releasing; configure it as a required status check in repository rules.
-Release packaging and Homebrew verification are covered by a later ticket.
+The same archive-based checks also run on the macOS 26 ARM64 compatibility runner,
+including source Homebrew installation. The `source_installation` CTest check
+builds and installs a CLI-only Release, checks the installed file inventory, and
+runs both demonstrations outside the build directory. A manual workflow dispatch
+against an existing approved tag repeats these checks on that exact tagged source
+and tests the stable Homebrew formula; see [RELEASING.md](RELEASING.md).
 
 Request validation requires `--input`, `--solution`, `--reference`, and all four
 inclusive bounds: `--min-length`, `--max-length`, `--min-value`, `--max-value`.
