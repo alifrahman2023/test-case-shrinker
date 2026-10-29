@@ -75,6 +75,9 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
         else result.errors.push_back({RunErrorKind::search_unavailable, "candidate search is not yet available; use --max-evaluations 0", {}, {}});
         save(SaveKind::final);
         observe_stops();
+        if (result.observed_reasons.cancellation &&
+            (result.outcome == RunOutcome::evaluation_limit || result.outcome == RunOutcome::time_limit))
+            result.outcome = RunOutcome::cancelled;
     }
     return result;
 }

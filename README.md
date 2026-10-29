@@ -197,3 +197,17 @@ and save exceptions obey the same single-final-attempt rule. Blocked callbacks
 and filesystem operations can delay stopping. The overall sleep-inclusive budget
 starts immediately before verification and includes callback/save time; cleanup
 and final saving can extend beyond it.
+
+Ctrl-C handling belongs to the terminal adapter, which records SIGINT in a
+signal-safe flag and checks it from ordinary code. Supplied programs run in
+separate process groups, retaining their intended signal masks/dispositions;
+the runner terminates owned direct children with immediate SIGKILL and shares
+one bounded cleanup wait. No descendant signaling or cleanup is added. Before
+verification, cancellation leaves the destination unchanged and emits no
+recovery input. After verification, cancellation retains the best known failing
+input and still attempts one final save, including when Ctrl-C arrives during
+saving. Status 130 denotes cancellation; observed cleanup/save/notifier errors
+require status 1 while preserving the cancellation reason and verified recovery
+state. Pending ownership remains explicit, and process exit cannot guarantee
+continued cleanup. Candidate-processing cancellation uses this same contract in
+the later search slice.

@@ -40,8 +40,13 @@ int main(int argc, char** argv) {
         signal(SIGINT, SIG_IGN);
         { std::ofstream ready(argv[2]); ready << "ready"; }
         for (;;) pause();
-    } else if (mode == "rendezvous" && argc == 4) {
-        { std::ofstream ready(argv[2]); ready << "ready"; }
+    } else if ((mode == "rendezvous" || mode == "rendezvous-ignore-interrupt") && argc == 4) {
+        if (mode == "rendezvous-ignore-interrupt") signal(SIGINT, SIG_IGN);
+        sigset_t mask; sigprocmask(SIG_SETMASK, nullptr, &mask);
+        struct sigaction action{}; sigaction(SIGINT, nullptr, &action);
+        { std::ofstream ready(argv[2]);
+          ready << getpid() << ' ' << getpgrp() << ' ' << sigismember(&mask, SIGINT)
+                << ' ' << (action.sa_handler == SIG_DFL); }
         for (int i = 0; i < 5000 && !std::filesystem::exists(argv[3]); ++i) usleep(1000);
         if (!std::filesystem::exists(argv[3])) return 97;
         std::cout << "met";

@@ -132,9 +132,11 @@ public:
         if (pid == 0) {
             // Only async-signal-safe operations between fork and exec. No signal
             // masks/dispositions were changed by the runner, so none leak.
-            int error = 0;
-            if (dup2(pipe_for(Stream::input)[read_end], STDIN_FILENO) < 0 || dup2(pipe_for(Stream::output)[write_end], STDOUT_FILENO) < 0
-                || dup2(pipe_for(Stream::error)[write_end], STDERR_FILENO) < 0) error = errno;
+            // Isolate terminal-generated signals while preserving inherited
+            // masks/dispositions. Cancellation signals only owned direct PIDs.
+            int error = setpgid(0, 0) < 0 ? errno : 0;
+            if (!error && (dup2(pipe_for(Stream::input)[read_end], STDIN_FILENO) < 0 || dup2(pipe_for(Stream::output)[write_end], STDOUT_FILENO) < 0
+                || dup2(pipe_for(Stream::error)[write_end], STDERR_FILENO) < 0)) error = errno;
             const int setup = pipe_for(Stream::setup)[write_end];
             for (const auto& pair : pipes) for (int fd : pair) if (fd != setup) {
                 if (close(fd) < 0 && !error) error = errno;

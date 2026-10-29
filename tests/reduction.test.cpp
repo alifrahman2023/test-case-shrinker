@@ -243,3 +243,58 @@ TEST_CASE("overall budget includes initial save time and final save still runs",
     REQUIRE(result.statistics.elapsed_ms == 200);
     REQUIRE(result.saving.final_outcome == FinalSaveOutcome::succeeded);
 }
+TEST_CASE("cancellation during final saving returns a cancelled run with verified recovery", "[reduction][cancellation]") {
+    Runner runner(std::make_unique<BaselineBackend>());
+    CancellationSource source;
+    std::vector<SaveKind> saves;
+    RunHooks hooks;
+    hooks.save = [&](const SaveRequest& save) -> SaveResult {
+        saves.push_back(save.kind);
+        if (save.kind == SaveKind::final) source.request_stop();
+        return {};
+    };
+    auto result = reduce(request(), runner, source.token(), hooks);
+    REQUIRE(result.outcome == RunOutcome::cancelled);
+    REQUIRE(result.observed_reasons.cancellation);
+    REQUIRE(result.observed_reasons.evaluation_limit);
+    REQUIRE(result.best->normalized_input == "3\n7 -2 7\n");
+    REQUIRE(saves == std::vector{SaveKind::initial, SaveKind::final});
+    REQUIRE(result.saving.final_outcome == FinalSaveOutcome::succeeded);
+    REQUIRE(result.statistics.candidate_evaluations == 0);
+    REQUIRE(result.statistics.round == RoundStatus::not_started);
+}
+TEST_CASE("cancelled callback failures preserve verified state and every stop reason", "[reduction][cancellation]") {
+    enum class Fault { initial_save, final_save, notifier };
+    for (auto fault : {Fault::initial_save, Fault::final_save, Fault::notifier}) {
+        Runner runner(std::make_unique<BaselineBackend>());
+        CancellationSource source;
+        std::vector<SaveKind> saves;
+        unsigned notifications = 0;
+        RunHooks hooks;
+        hooks.notify = [&](const RunEvent&) {
+            ++notifications;
+            if (fault == Fault::notifier) { source.request_stop(); throw std::runtime_error("notification failure"); }
+        };
+        hooks.save = [&](const SaveRequest& save) -> SaveResult {
+            saves.push_back(save.kind);
+            if ((fault == Fault::initial_save && save.kind == SaveKind::initial) ||
+                (fault == Fault::final_save && save.kind == SaveKind::final)) {
+                source.request_stop();
+                throw std::runtime_error("save failure");
+            }
+            return {};
+        };
+        auto result = reduce(request(), runner, source.token(), hooks);
+        REQUIRE(result.observed_reasons.cancellation);
+        REQUIRE(result.best->normalized_input == "3\n7 -2 7\n");
+        REQUIRE(result.baseline.status == BaselineStatus::verified);
+        REQUIRE(result.statistics.candidate_evaluations == 0);
+        REQUIRE(result.statistics.round == RoundStatus::not_started);
+        REQUIRE(result.errors.size() == 1);
+        REQUIRE(result.errors[0].kind == (fault == Fault::notifier ? RunErrorKind::notification : RunErrorKind::save));
+        REQUIRE(notifications == 1);
+        REQUIRE(saves == std::vector{SaveKind::initial, SaveKind::final});
+        REQUIRE(result.saving.final_outcome == (fault == Fault::final_save ? FinalSaveOutcome::failed : FinalSaveOutcome::succeeded));
+        REQUIRE_FALSE(runner.has_pending_ownership());
+    }
+}

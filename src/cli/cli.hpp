@@ -15,4 +15,9 @@ struct InvocationServices {
 };
 int run(std::span<const std::string_view> arguments, std::ostream& output,
         std::ostream& errors, const InvocationServices& services = {});
+// Terminal-process adapter: translates SIGINT through ordinary polling code.
+// Process-wide handler state precludes concurrent calls/reentry. Embedding
+// callers use run() and supply their own cancellation token and runner.
+int run_terminal(std::span<const std::string_view> arguments, std::ostream& output,
+                 std::ostream& errors, InvocationServices services = {});
 }
