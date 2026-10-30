@@ -38,7 +38,7 @@ std::optional<ValidationError> validate_constraints(const InputConstraints& cons
     return std::nullopt;
 }
 
-std::variant<std::vector<std::int64_t>, ValidationError>
+std::variant<ArrayNode, ValidationError>
 parse_input(std::string_view text, const InputConstraints& constraints) {
     if (auto error = validate_constraints(constraints)) return *error;
     auto header = next_token(text);
@@ -49,7 +49,7 @@ parse_input(std::string_view text, const InputConstraints& constraints) {
     if (*length < constraints.min_length || *length > constraints.max_length) {
         return ValidationError{ValidationCode::constraints, "input length is outside the declared bounds"};
     }
-    std::vector<std::int64_t> values;
+    ArrayNode values;
     std::unordered_set<std::int64_t> seen;
     for (std::int64_t index = 0; index < *length; ++index) {
         auto token = next_token(text);
@@ -62,24 +62,24 @@ parse_input(std::string_view text, const InputConstraints& constraints) {
             return ValidationError{ValidationCode::constraints, "element " + std::to_string(index + 1) + " is outside the declared value bounds"};
         }
         if (!values.empty()
-            && ((constraints.ordering == Ordering::ascending && *value < values.back())
-                || (constraints.ordering == Ordering::descending && *value > values.back()))) {
+            && ((constraints.ordering == Ordering::ascending && *value < values.back().value)
+                || (constraints.ordering == Ordering::descending && *value > values.back().value))) {
             return ValidationError{ValidationCode::constraints, "input does not satisfy the declared ordering"};
         }
         if (constraints.unique && !seen.insert(*value).second) {
             return ValidationError{ValidationCode::constraints, "input contains duplicate values"};
         }
-        values.push_back(*value);
+        values.append(IntegerNode{*value});
     }
     if (next_token(text)) return ValidationError{ValidationCode::element_count, "input has extra data after its declared elements"};
     return values;
 }
 
-std::string serialize_input(std::span<const std::int64_t> values) {
+std::string serialize_input(const ArrayNode& values) {
     auto text = std::to_string(values.size()) + '\n';
     for (std::size_t index = 0; index < values.size(); ++index) {
         if (index != 0) text += ' ';
-        text += std::to_string(values[index]);
+        text += std::to_string(values[index].value);
     }
     text += '\n';
     return text;

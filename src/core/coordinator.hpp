@@ -36,7 +36,7 @@ struct ReductionRequest {
 
 struct PreparedRequest {
     ReductionRequest request;
-    std::vector<std::int64_t> values;
+    ArrayNode input;
     std::string normalized_input;
 };
 

@@ -28,7 +28,7 @@ std::variant<PreparedRequest, ValidationError> prepare_request(ReductionRequest 
     }
     auto parsed = parse_input(request.input_text, request.constraints);
     if (auto* error = std::get_if<ValidationError>(&parsed)) return *error;
-    auto values = std::get<std::vector<std::int64_t>>(std::move(parsed));
+    auto values = std::get<ArrayNode>(std::move(parsed));
     auto normalized = serialize_input(values);
     return PreparedRequest{std::move(request), std::move(values), std::move(normalized)};
 }

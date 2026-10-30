@@ -12,11 +12,18 @@ shrink::ReductionRequest request(std::string text) {
 }
 }
 
+TEST_CASE("Parsed arrays serialize from their typed structure", "[input]") {
+    const shrink::InputConstraints constraints{0, 3, INT64_MIN, INT64_MAX};
+    auto parsed = shrink::parse_input(" \t3 7\n-2 7\t", constraints);
+    REQUIRE(std::holds_alternative<shrink::ArrayNode>(parsed));
+    REQUIRE(shrink::serialize_input(std::get<shrink::ArrayNode>(parsed)) == "3\n7 -2 7\n");
+}
+
 TEST_CASE("A typed request normalizes array layout while preserving values and order", "[input]") {
     auto result = shrink::prepare_request(request(" \t3\n7 -2\t7 \n"));
     REQUIRE(std::holds_alternative<shrink::PreparedRequest>(result));
     const auto& prepared = std::get<shrink::PreparedRequest>(result);
-    REQUIRE(prepared.values == std::vector<std::int64_t>{7, -2, 7});
+    REQUIRE(shrink::serialize_input(prepared.input) == "3\n7 -2 7\n");
     REQUIRE(prepared.normalized_input == "3\n7 -2 7\n");
     REQUIRE(prepared.request.input_text == " \t3\n7 -2\t7 \n");
 }
