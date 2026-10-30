@@ -91,7 +91,7 @@ int present_result(const ReductionResult& result, const std::filesystem::path& d
     }
     errors << "Stopped: " << outcome_text(result.outcome) << ".\n";
     if (result.baseline.original_length) errors << "Original length: " << *result.baseline.original_length << '\n';
-    if (result.best) errors << "Final length: " << result.best->values.size() << '\n';
+    if (result.best) errors << "Final length: " << result.best->input.size() << '\n';
     errors << "Baseline evaluations: " << result.statistics.baseline_evaluations
            << "; candidate evaluations: " << result.statistics.candidate_evaluations
            << "; acceptances: " << result.statistics.acceptances

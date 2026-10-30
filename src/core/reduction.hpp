@@ -19,7 +19,7 @@ struct RunError {
     std::optional<RunnerError> runner;
 };
 struct VerifiedInput {
-    std::vector<std::int64_t> values;
+    ArrayNode input;
     std::string normalized_input;
     std::uint64_t revision;
     std::shared_ptr<const Evaluation> evidence;

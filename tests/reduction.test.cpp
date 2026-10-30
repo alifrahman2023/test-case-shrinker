@@ -6,10 +6,40 @@
 #include <set>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 
 namespace {
 using namespace shrink;
 using namespace shrink::detail;
+// Test-side decoding keeps the ranking/local-check oracle independent of the
+// typed representation. Only bytes cross this seam.
+std::vector<std::int64_t> observed_values(std::string_view text) {
+    std::istringstream stream{std::string(text)};
+    std::size_t length = 0;
+    REQUIRE(static_cast<bool>(stream >> length));
+    std::vector<std::int64_t> values(length);
+    for (auto& value : values) REQUIRE(static_cast<bool>(stream >> value));
+    std::string extra;
+    REQUIRE_FALSE(static_cast<bool>(stream >> extra));
+    return values;
+}
+std::string oracle_text(const std::vector<std::int64_t>& values) {
+    std::ostringstream stream;
+    stream << values.size() << '\n';
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index) stream << ' ';
+        stream << values[index];
+    }
+    stream << '\n';
+    return stream.str();
+}
+std::vector<std::int64_t> parsed_values(std::string_view text, const InputConstraints& constraints) {
+    auto parsed = parse_input(text, constraints);
+    REQUIRE(std::holds_alternative<ArrayNode>(parsed));
+    const auto values = observed_values(text);
+    REQUIRE(serialize_input(std::get<ArrayNode>(parsed)) == oracle_text(values));
+    return values;
+}
 class BaselineBackend final : public ExecutionBackend {
 public:
     std::array<bool, 2> active{};
@@ -216,7 +246,7 @@ TEST_CASE("returned baseline and best evidence outlive the request and runner", 
         Runner runner(std::make_unique<BaselineBackend>());
         return reduce(request(), runner);
     }();
-    REQUIRE(result.best->values == std::vector<std::int64_t>{7, -2, 7});
+    REQUIRE(observed_values(result.best->normalized_input) == std::vector<std::int64_t>{7, -2, 7});
     REQUIRE(result.best->normalized_input == "3\n7 -2 7\n");
     REQUIRE(result.baseline.evaluation->execution.programs.solution.stdout_bytes == "1");
     REQUIRE(result.best->evidence->execution.programs.reference.stdout_bytes == "1.0");
@@ -497,9 +527,7 @@ TEST_CASE("removal accepts repeatable valid strict decreases with observed prese
         auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
         InputConstraints constraints{1, 6, 1, 7, Ordering::ascending, true};
         script->on_evaluation = [script, constraints](std::string_view text) {
-            auto parsed = parse_input(text, constraints);
-            REQUIRE(std::holds_alternative<std::vector<std::int64_t>>(parsed));
-            const auto& values = std::get<std::vector<std::int64_t>>(parsed);
+            const auto values = parsed_values(text, constraints);
             script->reference_output = std::find(values.begin(), values.end(), 1) != values.end() ? "2" : "1";
         };
         Runner runner(std::move(backend));
@@ -508,10 +536,11 @@ TEST_CASE("removal accepts repeatable valid strict decreases with observed prese
         std::size_t previous_length = 6;
         RunHooks hooks; hooks.notify = [&](const RunEvent& event) {
             if (event.kind != RunEventKind::acceptance) return;
-            REQUIRE(event.best.values.size() < previous_length);
-            REQUIRE(event.best.values.front() == 1);
+            const auto current = observed_values(event.best.normalized_input);
+            REQUIRE(current.size() < previous_length);
+            REQUIRE(current.front() == 1);
             REQUIRE(event.best.evidence->outcome == CandidateOutcome::preserved);
-            previous_length = event.best.values.size();
+            previous_length = current.size();
             accepted.push_back(event.best.normalized_input);
         };
         auto result = reduce(std::move(input), runner, {}, hooks);
@@ -565,7 +594,7 @@ TEST_CASE("empty and already simplest fixed-length inputs complete without candi
 TEST_CASE("duplicate-wide simplification preserves a failure that individual changes lose", "[reduction][values]") {
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
     script->on_evaluation = [script](std::string_view text) {
-        auto values = std::get<std::vector<std::int64_t>>(parse_input(text, {0, 3, -100, 100}));
+        auto values = parsed_values(text, {0, 3, -100, 100});
         script->reference_output = values.size() == 2 && values[0] == values[1] ? "2" : "1";
     };
     Runner runner(std::move(backend));
@@ -583,40 +612,40 @@ TEST_CASE("duplicate-wide simplification preserves a failure that individual cha
 TEST_CASE("magnitude simplification uses a unit step and binary search after simplest loses", "[reduction][values]") {
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
     script->on_evaluation = [script](std::string_view text) {
-        auto values = std::get<std::vector<std::int64_t>>(parse_input(text, {1, 1, 0, 100}));
+        auto values = parsed_values(text, {1, 1, 0, 100});
         script->reference_output = values[0] >= 37 ? "2" : "1";
     };
     Runner runner(std::move(backend));
     auto input = request(); input.input_text = "1 100"; input.constraints = {1, 1, 0, 100}; input.limits.max_evaluations.reset();
     auto result = reduce(std::move(input), runner);
     REQUIRE(result.outcome == RunOutcome::completed);
-    REQUIRE(result.best->values == std::vector<std::int64_t>{37});
+    REQUIRE(observed_values(result.best->normalized_input) == std::vector<std::int64_t>{37});
     REQUIRE(result.statistics.candidate_evaluations < 20);
     REQUIRE(result.statistics.round == RoundStatus::complete);
 }
 TEST_CASE("positive counterpart is tried even when magnitude simplification loses", "[reduction][values]") {
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
     script->on_evaluation = [script](std::string_view text) {
-        auto values = std::get<std::vector<std::int64_t>>(parse_input(text, {1, 1, -5, 5}));
+        auto values = parsed_values(text, {1, 1, -5, 5});
         script->reference_output = values[0] == -5 || values[0] == 5 ? "2" : "1";
     };
     Runner runner(std::move(backend));
     auto input = request(); input.input_text = "1 -5"; input.constraints = {1, 1, -5, 5}; input.limits.max_evaluations.reset();
     auto result = reduce(std::move(input), runner);
     REQUIRE(result.outcome == RunOutcome::completed);
-    REQUIRE(result.best->values == std::vector<std::int64_t>{5});
+    REQUIRE(observed_values(result.best->normalized_input) == std::vector<std::int64_t>{5});
 }
 TEST_CASE("individual repeated-element changes can succeed after duplicate-wide changes lose", "[reduction][values]") {
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
     script->on_evaluation = [script](std::string_view text) {
-        auto v = std::get<std::vector<std::int64_t>>(parse_input(text, {0, 3, 0, 9}));
+        auto v = parsed_values(text, {0, 3, 0, 9});
         script->reference_output = v.size() == 3 && (v[0] == 4 || v[0] == 0) && v[1] == 4 && v[2] == 9 ? "2" : "1";
     };
     Runner runner(std::move(backend));
     auto input = request(); input.input_text = "3 4 4 9"; input.constraints = {0, 3, 0, 9}; input.limits.max_evaluations.reset();
     auto result = reduce(std::move(input), runner);
     REQUIRE(result.outcome == RunOutcome::completed);
-    REQUIRE(result.best->values == std::vector<std::int64_t>{0, 4, 9});
+    REQUIRE(observed_values(result.best->normalized_input) == std::vector<std::int64_t>{0, 4, 9});
 }
 namespace {
 using Values = std::vector<std::int64_t>;
@@ -629,24 +658,24 @@ ReductionResult scripted_reduction(ReductionRequest input, const Predicate& pred
     auto backend = std::make_unique<BaselineBackend>(); auto* script = backend.get();
     const auto constraints = input.constraints;
     script->on_evaluation = [script, constraints, predicate](std::string_view text) {
-        auto parsed = parse_input(text, constraints);
-        REQUIRE(std::holds_alternative<Values>(parsed));
-        const auto outcome = predicate(std::get<Values>(parsed));
+        const auto outcome = predicate(parsed_values(text, constraints));
         script->reference_output = outcome == CandidateOutcome::lost ? "1" : "2";
         script->exit_codes[1] = outcome == CandidateOutcome::inconclusive ? 7 : 0;
     };
     Runner runner(std::move(backend));
-    auto previous = std::get<Values>(parse_input(input.input_text, constraints));
+    auto previous = observed_values(input.input_text);
     RunHooks hooks; hooks.notify = [&](const RunEvent& event) {
+        REQUIRE(serialize_input(event.best.input) == event.best.normalized_input);
         if (event.kind != RunEventKind::acceptance) return;
-        REQUIRE(std::holds_alternative<Values>(parse_input(event.best.normalized_input, constraints)));
-        REQUIRE(predicate(event.best.values) == CandidateOutcome::preserved);
+        REQUIRE(std::holds_alternative<ArrayNode>(parse_input(event.best.normalized_input, constraints)));
+        const auto current = observed_values(event.best.normalized_input);
+        REQUIRE(predicate(current) == CandidateOutcome::preserved);
         // Independent ranking oracle uses a wider signed integer.
-        REQUIRE((event.best.values.size() < previous.size() ||
-            (event.best.values.size() == previous.size() && std::lexicographical_compare(
-                event.best.values.begin(), event.best.values.end(), previous.begin(), previous.end(),
+        REQUIRE((current.size() < previous.size() ||
+            (current.size() == previous.size() && std::lexicographical_compare(
+                current.begin(), current.end(), previous.begin(), previous.end(),
                 [&](auto a, auto b) { return value_rank(a) < value_rank(b); }))));
-        previous = event.best.values;
+        previous = current;
         if (accepted) accepted->push_back(event.best.normalized_input);
     };
     return reduce(std::move(input), runner, {}, hooks, cache);
@@ -656,10 +685,10 @@ ReductionResult scripted_reduction(ReductionRequest input, const Predicate& pred
 void check_local_guarantee(const ReductionResult& result, const InputConstraints& constraints,
                            std::int64_t simplest, const Predicate& predicate) {
     REQUIRE(result.statistics.round == RoundStatus::complete);
-    const auto& original = result.best->values;
+    const auto original = observed_values(result.best->normalized_input);
     std::set<std::string> inconclusive;
     auto check = [&](const Values& candidate) {
-        const auto text = serialize_input(candidate);
+        const auto text = oracle_text(candidate);
         if (std::holds_alternative<ValidationError>(parse_input(text, constraints))) return;
         if (candidate == original) return;
         if (candidate.size() == original.size() && !std::lexicographical_compare(
@@ -697,7 +726,7 @@ TEST_CASE("signed extremes and constrained simplest values reduce safely", "[red
         Predicate preserves = [](const Values& v) { return v[0] >= 3 || v[0] <= -3 ? CandidateOutcome::preserved : CandidateOutcome::lost; };
         auto result = scripted_reduction(input, preserves);
         REQUIRE(result.outcome == RunOutcome::completed);
-        REQUIRE(result.best->values == Values{3});
+        REQUIRE(observed_values(result.best->normalized_input) == Values{3});
         check_local_guarantee(result, input.constraints, 0, preserves);
     }
     for (const auto bounds : {std::pair{-10, -3}, std::pair{3, 10}}) {
@@ -707,14 +736,14 @@ TEST_CASE("signed extremes and constrained simplest values reduce safely", "[red
         Predicate preserves = [](const Values&) { return CandidateOutcome::preserved; };
         auto result = scripted_reduction(input, preserves);
         const auto expected = bounds.first < 0 ? bounds.second : bounds.first;
-        REQUIRE(result.best->values == Values{expected});
+        REQUIRE(observed_values(result.best->normalized_input) == Values{expected});
         check_local_guarantee(result, input.constraints, expected, preserves);
     }
     auto input = request(); input.input_text = "1 " + std::to_string(low);
     input.constraints = {1, 1, low, high}; input.limits.max_evaluations.reset();
     Predicate only_min = [](const Values& v) { return v[0] == low ? CandidateOutcome::preserved : CandidateOutcome::lost; };
     auto result = scripted_reduction(input, only_min);
-    REQUIRE(result.best->values == Values{low});
+    REQUIRE(observed_values(result.best->normalized_input) == Values{low});
     REQUIRE(result.statistics.candidate_evaluations == 2);
     check_local_guarantee(result, input.constraints, 0, only_min);
 }
@@ -739,7 +768,7 @@ TEST_CASE("non-threshold failures establish only the direct local guarantee", "[
         return v[0] == 100 || v[0] == 99 || v[0] == 50 ? CandidateOutcome::preserved : CandidateOutcome::lost;
     };
     auto result = scripted_reduction(input, preserves);
-    REQUIRE(result.best->values == Values{99});
+    REQUIRE(observed_values(result.best->normalized_input) == Values{99});
     REQUIRE(preserves({50}) == CandidateOutcome::preserved);
     check_local_guarantee(result, input.constraints, 0, preserves);
 }
@@ -750,7 +779,7 @@ TEST_CASE("ordered unique candidates are validated before execution", "[reductio
         input.limits.max_evaluations.reset();
         Predicate preserves = [](const Values&) { return CandidateOutcome::preserved; };
         auto result = scripted_reduction(input, preserves);
-        REQUIRE(result.best->values == (ascending ? Values{-1, 0, 1} : Values{1, 0, -1}));
+        REQUIRE(observed_values(result.best->normalized_input) == (ascending ? Values{-1, 0, 1} : Values{1, 0, -1}));
         check_local_guarantee(result, input.constraints, 0, preserves);
     }
 }
@@ -771,7 +800,7 @@ TEST_CASE("complete and partial inconclusive counts deduplicate texts and reset 
     input.limits.max_evaluations.reset();
     Predicate equal_pair = [](const Values& v) { return v.size() == 2 && v[0] == v[1] ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
     auto simplified = scripted_reduction(input, equal_pair);
-    REQUIRE(simplified.best->values == Values{0, 0});
+    REQUIRE(observed_values(simplified.best->normalized_input) == Values{0, 0});
     REQUIRE(simplified.statistics.inconclusive_executions == 2);
     REQUIRE(simplified.statistics.distinct_inconclusive_candidates == 1);
     check_local_guarantee(simplified, input.constraints, 0, equal_pair);
@@ -824,7 +853,7 @@ TEST_CASE("final save errors preserve completed search facts and verified eviden
     auto result = reduce(std::move(input), runner, {}, hooks);
     REQUIRE(result.outcome == RunOutcome::completed);
     REQUIRE(result.statistics.round == RoundStatus::complete);
-    REQUIRE(result.best->values == Values{0});
+    REQUIRE(observed_values(result.best->normalized_input) == Values{0});
     REQUIRE(result.best->evidence->outcome == CandidateOutcome::preserved);
     REQUIRE(result.saving.final_outcome == FinalSaveOutcome::failed);
     REQUIRE(result.saving.last_saved_revision == 1);
@@ -879,7 +908,7 @@ TEST_CASE("cached inconclusive outcomes remain distinct by exact text despite co
     Predicate equal_pair = [](const Values& v) { return v.size() == 2 && v[0] == v[1] ? CandidateOutcome::preserved : CandidateOutcome::inconclusive; };
     auto cached = scripted_reduction(input, equal_pair, nullptr, {.forced_fingerprint = 0});
     auto plain = scripted_reduction(input, equal_pair, nullptr, {.enabled = false});
-    REQUIRE(cached.best->values == Values{0, 0});
+    REQUIRE(observed_values(cached.best->normalized_input) == Values{0, 0});
     REQUIRE(cached.best->normalized_input == plain.best->normalized_input);
     REQUIRE(cached.statistics.inconclusive_executions == 2);
     REQUIRE(plain.statistics.inconclusive_executions == 4);
@@ -917,12 +946,12 @@ TEST_CASE("errors cancelled evaluations and prior invocation cache state are nev
         auto input = request(); input.input_text = "1 5"; input.constraints = {1, 1, 0, 5}; input.limits.max_evaluations.reset();
         auto interrupted = reduce(input, runner, source.token(), {}, {.forced_fingerprint = 0});
         REQUIRE(interrupted.outcome == (failure ? RunOutcome::operational_stop : RunOutcome::cancelled));
-        REQUIRE(interrupted.best->values == Values{5});
+        REQUIRE(observed_values(interrupted.best->normalized_input) == Values{5});
         REQUIRE(interrupted.statistics.acceptances == 0);
         first_run = false; script->failure.reset();
         auto fresh = reduce(input, runner, {}, {}, {.forced_fingerprint = 0});
         REQUIRE(fresh.outcome == RunOutcome::completed);
-        REQUIRE(fresh.best->values == Values{0});
+        REQUIRE(observed_values(fresh.best->normalized_input) == Values{0});
         REQUIRE(baseline_launches == 2);
         REQUIRE(candidate_launches == 2);
     }
@@ -964,7 +993,7 @@ TEST_CASE("eviction reexecutes old texts while completed binary-search sequences
     auto evicted = scripted_reduction(input, threshold, &evicted_sequence, {.max_entries = 1, .forced_fingerprint = 0});
     REQUIRE(cached.outcome == RunOutcome::completed);
     REQUIRE(evicted.outcome == RunOutcome::completed);
-    REQUIRE(cached.best->values == Values{37});
+    REQUIRE(observed_values(cached.best->normalized_input) == Values{37});
     REQUIRE(evicted.best->normalized_input == plain.best->normalized_input);
     REQUIRE(cached_sequence == plain_sequence);
     REQUIRE(evicted_sequence == plain_sequence);
@@ -984,7 +1013,7 @@ TEST_CASE("real compiled programs preserve completed accepted sequences across c
         };
         auto result = reduce(input, runner, {}, hooks, controls);
         REQUIRE(result.outcome == RunOutcome::completed);
-        REQUIRE(result.best->values == Values{0, 0});
+        REQUIRE(observed_values(result.best->normalized_input) == Values{0, 0});
         REQUIRE(accepted == std::vector<std::string>{"2\n42 42\n", "2\n0 0\n"});
         REQUIRE(result.statistics.distinct_inconclusive_candidates == 0);
     }
@@ -998,7 +1027,7 @@ TEST_CASE("final-round uncertainty includes cache hits learned before an accepta
     auto cached = scripted_reduction(input, preserves, &accepted, {.forced_fingerprint = 0});
     auto plain = scripted_reduction(input, preserves, &plain_accepted, {.enabled = false});
     REQUIRE(cached.outcome == RunOutcome::completed);
-    REQUIRE(cached.best->values == Values{0, 5});
+    REQUIRE(observed_values(cached.best->normalized_input) == Values{0, 5});
     REQUIRE(accepted == plain_accepted);
     REQUIRE(cached.statistics.candidate_evaluations == 6);
     REQUIRE(plain.statistics.candidate_evaluations == 9);

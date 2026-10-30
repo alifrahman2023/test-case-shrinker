@@ -25,7 +25,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
         return result;
     }
     auto input = std::get<PreparedRequest>(std::move(prepared));
-    result.baseline.original_length = input.values.size();
+    result.baseline.original_length = input.input.size();
     const auto start = runner.now_ms();
     auto observe_stops = [&] {
         result.statistics.elapsed_ms = runner.now_ms() - start;
@@ -65,7 +65,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
         if (evaluation->outcome == CandidateOutcome::inconclusive) ++result.statistics.inconclusive_executions;
     } else {
         result.baseline.status = BaselineStatus::verified;
-        result.best = VerifiedInput{std::move(input.values), std::move(input.normalized_input), 1, evaluation};
+        result.best = VerifiedInput{std::move(input.input), std::move(input.normalized_input), 1, evaluation};
         bool notifications_enabled = static_cast<bool>(hooks.notify);
         auto notify = [&](RunEventKind kind) {
             if (!notifications_enabled) return;
@@ -126,29 +126,29 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
             auto attempt = [&](auto transform) {
                 if (stopped || between_evaluations()) { stopped = true; return false; }
                 const auto& constraints = input.request.constraints;
-                std::vector<std::int64_t> values;
+                ArrayNode values;
                 std::unordered_set<std::int64_t> unique;
                 std::string body;
-                for (std::size_t index = 0; index < result.best->values.size(); ++index) {
+                for (std::size_t index = 0; index < result.best->input.size(); ++index) {
                     if (index % 1024 == 0 && observe_stops()) { stopped = true; return false; }
-                    auto value = transform(index, result.best->values[index]);
+                    auto value = transform(index, result.best->input[index].value);
                     if (!value) continue;
                     if (*value < constraints.min_value || *value > constraints.max_value) return false;
-                    if (!values.empty() && ((constraints.ordering == Ordering::ascending && *value < values.back())
-                        || (constraints.ordering == Ordering::descending && *value > values.back()))) return false;
+                    if (!values.empty() && ((constraints.ordering == Ordering::ascending && *value < values.back().value)
+                        || (constraints.ordering == Ordering::descending && *value > values.back().value))) return false;
                     if (constraints.unique && !unique.insert(*value).second) return false;
                     if (!values.empty()) body += ' ';
-                    values.push_back(*value);
+                    values.append(IntegerNode{*value});
                     body += std::to_string(*value);
                 }
                 if (values.size() < static_cast<std::uint64_t>(constraints.min_length)
                     || values.size() > static_cast<std::uint64_t>(constraints.max_length)) return false;
-                bool smaller = values.size() < result.best->values.size();
-                if (values.size() == result.best->values.size()) {
+                bool smaller = values.size() < result.best->input.size();
+                if (values.size() == result.best->input.size()) {
                     for (std::size_t index = 0; index < values.size(); ++index) {
                         if (index % 1024 == 0 && observe_stops()) { stopped = true; return false; }
-                        if (values[index] == result.best->values[index]) continue;
-                        smaller = simpler(values[index], result.best->values[index]);
+                        if (values[index].value == result.best->input[index].value) continue;
+                        smaller = simpler(values[index].value, result.best->input[index].value);
                         break;
                     }
                 }
@@ -191,7 +191,7 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
             const auto simplest = std::clamp<std::int64_t>(0, input.request.constraints.min_value, input.request.constraints.max_value);
             auto simplify = [&](const std::vector<std::size_t>& positions) {
                 if (positions.empty() || stopped) return;
-                auto current = result.best->values[positions.front()];
+                auto current = result.best->input[positions.front()].value;
                 auto replace = [&](std::int64_t replacement) {
                     return attempt([&](std::size_t index, std::int64_t value) -> std::optional<std::int64_t> {
                         return std::binary_search(positions.begin(), positions.end(), index) ? replacement : value;
@@ -217,9 +217,9 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                 inconclusive.clear();
                 result.statistics.distinct_inconclusive_candidates = 0;
                 const auto starting_revision = result.best->revision;
-                for (std::size_t chunk = std::max<std::size_t>(1, result.best->values.size() / 2); chunk && !stopped; chunk /= 2) {
-                    for (std::size_t position = 0; position < result.best->values.size() && !stopped;) {
-                        const auto count = std::min(chunk, result.best->values.size() - position);
+                for (std::size_t chunk = std::max<std::size_t>(1, result.best->input.size() / 2); chunk && !stopped; chunk /= 2) {
+                    for (std::size_t position = 0; position < result.best->input.size() && !stopped;) {
+                        const auto count = std::min(chunk, result.best->input.size() - position);
                         if (!attempt([&](std::size_t index, std::int64_t value) -> std::optional<std::int64_t> {
                             if (index >= position && index - position < count) return {};
                             return value;
@@ -230,31 +230,33 @@ ReductionResult reduce(ReductionRequest request, Runner& runner, CancellationTok
                 // round revisits groups changed or merged by earlier acceptances.
                 std::vector<std::int64_t> targets;
                 std::unordered_set<std::int64_t> seen;
-                for (auto value : result.best->values) {
+                for (auto integer : result.best->input.elements()) {
+                    const auto value = integer.value;
                     if (observe_stops()) { stopped = true; break; }
                     if (seen.insert(value).second) targets.push_back(value);
                 }
                 for (auto target : targets) {
                     if (stopped) break;
                     std::vector<std::size_t> positions;
-                    for (std::size_t index = 0; index < result.best->values.size(); ++index) {
+                    for (std::size_t index = 0; index < result.best->input.size(); ++index) {
                         if (index % 1024 == 0 && observe_stops()) { stopped = true; break; }
-                        if (result.best->values[index] == target) positions.push_back(index);
+                        if (result.best->input[index].value == target) positions.push_back(index);
                     }
                     simplify(positions);
                 }
                 std::unordered_map<std::int64_t, std::size_t> frequencies;
-                for (auto value : result.best->values) {
+                for (auto integer : result.best->input.elements()) {
+                    const auto value = integer.value;
                     if (observe_stops()) { stopped = true; break; }
                     ++frequencies[value];
                 }
-                for (std::size_t index = 0; index < result.best->values.size() && !stopped; ++index) {
+                for (std::size_t index = 0; index < result.best->input.size() && !stopped; ++index) {
                     if (observe_stops()) { stopped = true; break; }
-                    const auto prior = result.best->values[index];
+                    const auto prior = result.best->input[index].value;
                     if (frequencies[prior] < 2) continue;
                     simplify({index});
                     --frequencies[prior];
-                    ++frequencies[result.best->values[index]];
+                    ++frequencies[result.best->input[index].value];
                 }
                 if (between_evaluations()) stopped = true;
                 if (!stopped && result.best->revision == starting_revision) {

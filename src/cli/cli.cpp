@@ -60,7 +60,7 @@ int run(std::span<const std::string_view> arguments, std::ostream& output,
         if (event.kind != RunEventKind::progress || invocation.quiet) return;
         errors << "Progress: evaluations " << event.statistics.candidate_evaluations
                << "; acceptances " << event.statistics.acceptances
-               << "; best length " << event.best.values.size()
+               << "; best length " << event.best.input.size()
                << "; elapsed " << event.statistics.elapsed_ms << " ms\n";
     };
     auto result = reduce(std::move(invocation.core.request), runner, services.cancellation, hooks, services.cache);
